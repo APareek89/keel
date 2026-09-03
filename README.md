@@ -110,7 +110,44 @@ type anything. Add to `~/.claude/settings.json`:
 It fails silently and exits 0 if the brain is missing, so a broken hook never blocks a
 session. `keel health` warns if it is loading nothing.
 
-### Codex
+### MCP server — one brain, every client
+
+A local stdio MCP server exposes the brain to Claude Desktop, Codex and Cursor.
+**No database, no auth, no hosting** — it is a process on your own machine reading
+your own markdown. The files are the database.
+
+```json
+// ~/Library/Application Support/Claude/claude_desktop_config.json
+{ "mcpServers": { "keel": {
+    "command": "python3",
+    "args": ["/Users/YOU/.claude/skills/keel/scripts/mcp_server.py"] } } }
+```
+
+```toml
+# ~/.codex/config.toml
+[mcp_servers.keel]
+command = "python3"
+args = ["/Users/YOU/.codex/skills/keel/scripts/mcp_server.py"]
+```
+
+Seven tools: `keel_recall` `keel_remember` `keel_list_entities` `keel_read`
+`keel_health` `keel_missing` `keel_todo`. Check it before wiring a client:
+
+```bash
+python3 scripts/mcp_server.py --selftest
+```
+
+This is what makes the brain *shared* rather than copied. Without it each client
+holds its own snapshot and they drift; with it, a capture from Claude Desktop
+lands in the same inbox as one from Claude Code.
+
+**claude.ai in a browser is the one surface this does not reach** — a local server
+is not reachable from a web page. Upload the brain to a Project for read-only use
+there. Remote MCP would fix it and is deliberately not built: hosting other
+people's brains means auth, storage and a privacy surface, which is a company
+rather than a tool you can `git clone`.
+
+### Codex skill
 
 Codex has no session-start hook, so its always-loaded file *is* the hook:
 
