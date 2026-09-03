@@ -1,0 +1,7 @@
+# never commit a real brain — it contains colleagues, commitments and live work
+brain/
+_index/
+*.html
+.DS_Store
+__pycache__/
+*.pyc

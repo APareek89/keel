@@ -1,0 +1,19 @@
+---
+id: preference-brief-format
+type: preference
+title: How Priya wants campaign briefs
+status: active
+confidence: high
+scope: personal
+provenance: session:2026-09-03
+created: 2026-09-03
+updated: 2026-09-03
+review_by: 2027-03-01
+about:
+  - relation: applies_to
+    entity: task_type-campaign-launch
+---
+
+One page. Objective, audience, the single message, the constraint, the measure of success. No mood boards in the brief — those come after the message is agreed.
+
+If a brief needs two pages the thinking is not finished.
