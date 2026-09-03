@@ -1,6 +1,6 @@
 ---
 name: keel
-description: Keel — a persistent context layer for the user, backed by a markdown knowledge base at ~/brain. Invoked bare ("/keel") it runs first-time setup, or shows a command menu once set up. Use it to load the user's preferences, active decisions, stakeholders and open loops at the start of substantive work so output is aligned without them re-briefing you; to capture new decisions, preferences, people, tasks and commitments mid-conversation; for their morning brief; and to check what the brain is missing or where it has gone stale. Trigger on "orient me", "what do I need to know", "catch me up", "remember this", "what's pending", "morning brief", "start my day", "what am I waiting on", "what did we decide about X", "is the brain ok", "show me the brain" — and also proactively whenever a session involves drafting a document, making or revisiting a decision, running a recurring piece of work, or working with named colleagues, even when the user doesn't mention the brain at all.
+description: Keel — a persistent context layer for the user, backed by a markdown knowledge base at ~/brain. Invoked bare ("/keel") it runs first-time setup, wires a new client, or shows a command menu. Use it to load the user's preferences, active decisions, stakeholders and open loops at the start of substantive work so output is aligned without them re-briefing you; to capture new decisions, preferences, people, tasks and commitments mid-conversation; for their morning brief; and to check what the brain is missing or where it has gone stale. Trigger on "orient me", "what do I need to know", "catch me up", "remember this", "what's pending", "morning brief", "start my day", "what am I waiting on", "what did we decide about X", "is the brain ok", "show me the brain" — and also proactively whenever a session involves drafting a document, making or revisiting a decision, running a recurring piece of work, or working with named colleagues, even when the user doesn't mention the brain at all.
 ---
 
 # Keel
@@ -15,14 +15,41 @@ at least as hard as the first.
 
 ---
 
-## First invocation — go straight to setup, don't show a menu
+## First invocation — set up, then show the commands
 
-Check `~/brain/_index/setup.json` before anything else.
+Read `~/brain/_index/setup.json` before anything else. Three cases:
 
-**Missing** → setup has never run. Do **not** print the menu. Go straight into
-Get Started below and finish it in this turn.
+**1. No file, or the brain has fewer than three nodes** → nothing has been set up.
+Run [Get Started](#get-started) in full, then print the menu. Do not show the menu
+first and make them pick it — they invoked the command, that *is* the request.
 
-**Present** → print the menu and stop.
+**2. File exists but this client is not in its `clients` list** → the brain is
+built, but this editor is not wired to it yet. Do the short client setup below,
+then print the menu. This is the Codex-after-Claude case, and vice versa.
+
+**3. File exists and this client is listed** → print the menu and stop.
+
+### Client setup (case 2 — takes one step, no questions)
+
+Work out which client you are in — `~/.claude/skills/keel/` means Claude Code,
+`~/.codex/skills/keel/` means Codex — and wire only that one:
+
+- **Claude Code**: confirm a `SessionStart` hook exists in `~/.claude/settings.json`
+  pointing at `scripts/session_start.py`. If not, offer to add it (one edit), since
+  without it nothing loads automatically.
+- **Codex**: run `brain.py export-codex`. Codex has no session-start hook, so
+  `~/.codex/AGENTS.md` *is* the always-loaded surface.
+
+Then add the client to `setup.json` and say in one line what changed:
+
+```
+Keel wired to Codex — your profile and preferences now load into every Codex
+session via AGENTS.md.
+```
+
+Then print the menu. Total: one action, no questions.
+
+### The menu
 
 ```
 Keel — what would you like?
@@ -38,7 +65,7 @@ Keel — what would you like?
 ```
 
 Fill in N from the file count in `~/brain/inbox/`. Print it and stop — no
-commentary, and don't recommend which to pick unless they ask.
+commentary, and don't recommend which to pick unless asked.
 
 ---
 
@@ -57,7 +84,9 @@ this turn.
 - **Never stop midway to ask.** If a source is slow, unparseable or empty, skip it
   and mention it in the closing summary.
 
-Close by printing the menu above, then exactly this shape of line:
+**Always end by printing the menu.** Setup that finishes without showing what
+can be done next leaves them with a built brain and no idea how to use it. Print
+the menu, then exactly this shape of line:
 
 ```
 Keel is live — 24 proposals waiting. Carry on with your work.
@@ -126,8 +155,17 @@ matters beats a rich node for one.
 Finally write the setup marker so the menu stops offering this:
 
 ```json
-{ "completed": "YYYY-MM-DD", "sources": ["slack", "uploads"], "version": 3 }
+{
+  "completed": "YYYY-MM-DD",
+  "sources": ["slack", "uploads"],
+  "clients": ["claude-code"],
+  "version": 4
+}
 ```
+
+`clients` is what stops a fresh install in the other editor from either
+re-running the whole setup or silently doing nothing. Add `"codex"` when Codex is
+wired, `"claude-code"` when Claude Code is.
 
 to `~/brain/_index/setup.json`, then show them the menu.
 
@@ -405,16 +443,16 @@ A **document** — only documents carry `about:`:
 
 ```yaml
 ---
-id: decision-2026-09-02-park-not-archive
+id: decision-2026-09-02-park-dont-archive
 type: decision
-title: Retire prices by parking, not archiving
+title: Retire prices by tag-parking, never by archiving
 status: active
 confidence: high
 review_by: 2027-03-02
 about:
   - relation: constrains
     entity: task_type-pricing-change
-supersedes: decision-2026-08-prior-approach    # doc → doc, a field not an edge
+supersedes: decision-2026-08-archive-retired    # doc → doc, a field not an edge
 ---
 
 Prose written for a model to read. This is the part that gets retrieved and
@@ -422,7 +460,7 @@ actually used — the graph only helps find it.
 ```
 
 `review_by` is mandatory on both. A brain where nothing expires rots quietly until
-a stale fact embarrasses them, and then they stop trusting all of it.
+a stale fact embarrasses them, and then they stops trusting all of it.
 
 ### Vocabularies
 
