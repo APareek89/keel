@@ -610,8 +610,12 @@ maps topics to the phrases the user actually types — they say "cover letter",
 never "job search". Without it, matching silently under-reports. It is also where
 matching goes *wrong*: one generic word there merges unrelated topics into
 identical hour counts, which looks like working data and is not. A single shared
-tag once fused three separate projects this way. Keep phrases distinctive; run
-`digest` to find work no topic claims yet. See `examples/lexicon.example.json`.
+tag once fused three separate projects this way. The opposite failure is just as
+easy: two topics sharing a common word ("notebook") caused the nightly pass to
+auto-create a second node for work that already had one. **Before adding a topic,
+check whether an existing one already covers it, and pin it with `entity_map`
+rather than letting it spawn a duplicate.** Keep phrases distinctive; run `digest`
+to find work no topic claims yet. See `examples/lexicon.example.json`.
 
 **Transcripts are not user speech.** A `type:user` record contains injected skill
 text, pastes, command output and tool results. Counting those produces confident
