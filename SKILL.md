@@ -489,10 +489,18 @@ a stale fact embarrasses them, and then they stops trusting all of it.
 Direction reads subject → object: `task-q4-campaign --owned_by--> person-self`.
 Getting it backwards silently corrupts traversal.
 
-**Preferences are scoped, not global.** A preference with `relation: applies_to`
-fires only for that task type. One with no `about:` at all is global — correct for
-"give a recommendation, not a survey", and it loads via the hook rather than being
-retrieved.
+**Preferences are scoped, not global — and this decides what every session pays
+for.** A preference with `about:` fires only for what it names and is retrieved on
+demand. One with no `about:` is **loaded into every session, forever**, so it must
+be genuinely cross-cutting: "give a recommendation, not a survey", how they want to
+be taught, document conventions. That is about four files.
+
+**Anchor every captured preference.** A capture written without `about:` silently
+becomes global and starts taxing unrelated sessions. Five absorbed at once was
+enough to push the real standing rules out of the budget, and because the loader
+sorted by filename, `audio-course-teaching-style` evicted `working-with-me`.
+Anything `ignore` is never loaded, and scoped preferences are deferred rather than
+competing, so "over budget" now means genuine pressure.
 
 ### Layout
 

@@ -528,9 +528,37 @@ CONTEXT_BUDGET = 6000   # chars (~1.5k tokens): a preference file that grows
 
 def build_context(days=14):
     """Profile + preferences + live topics. Shared by the hook and the Codex export."""
-    chunks, used, skipped = [], 0, 0
-    paths = [BRAIN / "graph" / "profile.md"]
-    paths += sorted((BRAIN / "wiki" / "preferences").glob("*.md"))
+    chunks, used, skipped, dropped = [], 0, 0, []
+
+    # What belongs in EVERY session is only what is genuinely cross-cutting.
+    # A preference about one project is retrieved when that project comes up;
+    # loading it always crowds out the standing rules. Ordering by filename —
+    # the previous behaviour — let "audio-course" evict "working-with-me".
+    try:
+        lex = json.loads((BRAIN / "_index" / "lexicon.json").read_text()).get("topics", {})
+    except Exception:
+        lex = {}
+
+    def rank(p):
+        fm, body = load_md(p)
+        # The skill already defines this explicitly: a preference with `about:`
+        # fires only for what it names; one without it is global. Do not second-
+        # guess an explicit contract with a fuzzy keyword match.
+        scoped = "about:" in raw_fm(p)
+        directive = (fm.get("directive") or "use").strip('"')
+        return (0 if directive == "use" else 1, 1 if scoped else 0,
+                -len(body), p.name), directive, scoped
+
+    prefs = []
+    for p in sorted((BRAIN / "wiki" / "preferences").glob("*.md")):
+        key, directive, scoped = rank(p)
+        if directive == "ignore":          # superseded: never load, never delete
+            continue
+        if scoped:                         # project-specific: retrieved on demand,
+            continue                       # not carried by every unrelated session
+        prefs.append((key, p, scoped))
+    prefs.sort(key=lambda x: x[0])
+    paths = [BRAIN / "graph" / "profile.md"] + [p for _, p, _ in prefs]
     for p in paths:
         try:
             text = p.read_text(encoding="utf-8", errors="replace").strip()
@@ -540,6 +568,7 @@ def build_context(days=14):
             continue
         if used + len(text) > CONTEXT_BUDGET:
             skipped += 1
+            dropped.append(p.stem)
             continue
         chunks.append(text)
         used += len(text)
@@ -583,6 +612,9 @@ def build_context(days=14):
             live_block = "\n".join(lines)
     except Exception:
         pass
+    if dropped:
+        live_block += ("\n\n_Not loaded (over budget): " + ", ".join(dropped[:8])
+                       + ". Ask the brain for them by name if this session needs them._")
     return DIRECTIVE_LEGEND + "\n" + "\n\n".join(chunks) + live_block, skipped
 
 
