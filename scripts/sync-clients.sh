@@ -7,9 +7,15 @@
 set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Backups go OUTSIDE the skills directories. A copy left beside the skill is
+# discovered as a second, duplicate skill by the client — same name, same
+# description, offered to the model twice.
+BKDIR="${KEEL_BACKUP_DIR:-$HOME/.keel-backups}"
+mkdir -p "$BKDIR"
+
 for DEST in "$HOME/.claude/skills/keel" "$HOME/.codex/skills/keel"; do
   [ -d "$DEST" ] || { echo "skip   $DEST (not installed)"; continue; }
-  BK="$DEST.bak.$(date +%Y%m%d%H%M%S)"
+  BK="$BKDIR/$(basename "$(dirname "$(dirname "$DEST")")")-keel.$(date +%Y%m%d%H%M%S)"
   cp -R "$DEST" "$BK"
   mkdir -p "$DEST/scripts"
   cp "$SRC/SKILL.md" "$DEST/SKILL.md"
@@ -20,7 +26,7 @@ for DEST in "$HOME/.claude/skills/keel" "$HOME/.codex/skills/keel"; do
   done
   [ -d "$DEST/templates" ] && cp -R "$SRC/templates/." "$DEST/templates/"
   [ -d "$DEST/examples" ]  && cp -R "$SRC/examples/."  "$DEST/examples/"
-  echo "synced $DEST   (backup: $(basename "$BK"))"
+  echo "synced $DEST   (backup: $BK)"
 done
 
 echo
