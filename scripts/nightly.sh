@@ -7,7 +7,9 @@ LOG="$HOME/brain/_index/nightly.log"
 mkdir -p "$(dirname "$LOG")"
 {
   echo "=== $(date '+%Y-%m-%d %H:%M') ==="
+  python3 "$S/autobrain.py" absorb --days 45 --apply
   python3 "$S/autobrain.py" promote --days 45 --apply
+  python3 "$S/autobrain.py" state  --days 90 --apply
   python3 "$S/autobrain.py" export-codex --days 14
   python3 "$S/brain.py" view --no-open
   echo

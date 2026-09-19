@@ -314,7 +314,13 @@ def analyse(args):
             promo.append({"type": typ, "tags": list(tags), "count": len(items),
                           "days": len(days), "paths": [str(i["path"]) for i in items]})
     promo.sort(key=lambda p: -p["count"])
-    return {"rows": rows, "unmatched_hours": round(unmatched / 60, 1),
+    gated = []
+    for path in sorted(list((BRAIN / "graph").rglob("*.md"))):
+        fm, _ = load_md(path)
+        if fm.get("directive") in ("confirm", "verify") and fm.get("id"):
+            gated.append({"id": fm["id"],
+                          "note": (fm.get("state_note", "") or fm.get("relevance", "")).strip('"')})
+    return {"gated": gated, "rows": rows, "unmatched_hours": round(unmatched / 60, 1),
             "sessions": len(sessions), "inbox_total": len(inbox),
             "inbox_clusters": promo, "lexicon_size": len(lexicon)}
 
@@ -494,12 +500,20 @@ def build_context(days=14):
                              f" (last {x['last']}){flag}")
             lines.append(
                 "\nIf this session's work matches one of these, say in one line what you "
-                "loaded from the brain. If a node is flagged stale and you are about to "
-                "rely on it, ask before using it.")
+                "loaded from the brain.")
+            try:
+                gated = [x for x in r.get("gated", [])]
+                if gated:
+                    lines.append("\n**Needs your confirmation before use** — quiet long "
+                                 "enough that it may have moved on:")
+                    for g in gated[:6]:
+                        lines.append(f"- `{g['id']}` ({g['note']})")
+            except Exception:
+                pass
             live_block = "\n".join(lines)
     except Exception:
         pass
-    return "\n\n".join(chunks) + live_block, skipped
+    return DIRECTIVE_LEGEND + "\n" + "\n\n".join(chunks) + live_block, skipped
 
 
 def cmd_session_start(args):
@@ -521,6 +535,207 @@ def cmd_session_start(args):
                                "additionalContext": header + "\n\n" + body},
         "suppressOutput": True,
     }))
+
+
+# ---------------------------------------------------------------- state engine
+# Nothing is deleted and nothing waits for approval. Everything carries keywords
+# saying how much weight a session should give it. Two INDEPENDENT axes, because
+# a thing can be recent but unproven, or old but certain, and those need
+# different answers. The stricter directive wins.
+
+CURRENT_DAYS, FADING_DAYS = 14, 60
+# Identity does not decay with disuse — a colleague's role is not made uncertain
+# by a quiet fortnight. Only work state decays. Global preferences and the profile
+# are loaded every session by the hook; gating them behind `confirm` is absurd.
+NO_DECAY_TYPES = {"profile", "person", "org", "skill"}
+STRICTNESS = {"use": 0, "cite": 1, "confirm": 2, "verify": 3, "ignore": 4}
+MANAGED = ("last_activity", "relevance", "evidence", "directive", "state_note")
+
+DIRECTIVE_LEGEND = """\
+How to read the `directive:` on anything in this brain:
+- `use`     — apply it; no need to mention it
+- `cite`    — apply it, but say it is unconfirmed (inferred from 1-2 sessions)
+- `confirm` — ASK before relying on it; the work has moved on (15-60 days quiet)
+- `verify`  — the content may be false; newer activity contradicts it, check first
+- `ignore`  — do not load unless explicitly asked; retained, never deleted
+"""
+
+
+def relevance_band(days):
+    if days is None:
+        return "unknown", "cite"
+    if days <= CURRENT_DAYS:
+        return "current", "use"
+    if days <= FADING_DAYS:
+        return "fading", "confirm"
+    return "dormant", "ignore"
+
+
+def evidence_band(fm, captures, contradicted):
+    if fm.get("status") == "superseded" or fm.get("superseded_by"):
+        return "superseded", "ignore"
+    if contradicted:
+        return "contradicted", "verify"
+    if (fm.get("confidence", "") or "").lower() == "high" and fm.get("auto") != "true":
+        return "stated", "use"          # written because the user said so
+    if captures >= MIN_CAPTURES:
+        return "observed", "use"
+    if captures >= 1 or fm.get("auto") == "true":
+        return "inferred", "cite"
+    return "stated", "use"
+
+
+def strictest(*directives):
+    return max(directives, key=lambda d: STRICTNESS.get(d, 0))
+
+
+def set_frontmatter(path, values, note=None):
+    """Upsert scalar keys after the `type:` line, leaving lists untouched."""
+    raw = path.read_text()
+    m = RE_FM.match(raw)
+    if not m:
+        return False
+    fm, body = m.group(1), m.group(2)
+    lines = [l for l in fm.splitlines()
+             if not any(re.match(rf"^{k}:", l) for k in MANAGED)]
+    block = [f"{k}: {v}" for k, v in values.items() if v is not None]
+    if note:
+        block.append(f"state_note: {note}")
+    out, done = [], False
+    for l in lines:
+        out.append(l)
+        if not done and re.match(r"^type:", l):
+            out.extend(block); done = True
+    if not done:
+        out.extend(block)
+    path.write_text("---\n" + "\n".join(out) + "\n---\n" + body)
+    return True
+
+
+def raw_fm(path):
+    m = RE_FM.match(path.read_text())
+    return m.group(1) if m else ""
+
+
+def topic_of(text, lexicon):
+    best, score = None, 0
+    low = text.lower()
+    for topic, kws in lexicon.items():
+        h = sum(low.count(k) for k in kws)
+        if h > score:
+            best, score = topic, h
+    return best
+
+
+def cmd_state(args):
+    sessions = read_sessions(90)
+    ents, inbox = brain_entities(), inbox_items()
+    lexicon = build_lexicon(ents, inbox, sessions)
+    agg, _ = score(sessions, lexicon)
+    today = dt.date.today()
+
+    cap_count = collections.Counter()
+    for it in inbox:
+        t = topic_of(" ".join(it["tags"]) + " " + it["title"] + " " + it["body"][:400], lexicon)
+        if t:
+            cap_count[t] += 1
+
+    changed, rows = 0, []
+    for path in sorted(list((BRAIN / "graph").rglob("*.md"))
+                       + list((BRAIN / "wiki").rglob("*.md"))):
+        fm, body = load_md(path)
+        if not fm.get("id"):
+            continue
+        topic = topic_of(f"{fm.get('title','')} {fm.get('tags','')} {path.stem} {body[:600]}",
+                         lexicon)
+        owner_pre = match_entity(topic, ents) if topic else None
+        inherits = bool(owner_pre and owner_pre["id"] == fm["id"]) or \
+            path.parent.name in ("decisions", "preferences", "constraints", "risks",
+                                 "playbooks", "notes", "tasks")
+        act = agg.get(topic, {}).get("last") if (topic and inherits) else None
+        act_date = act.date() if act else None
+        upd = None
+        try:
+            upd = dt.date.fromisoformat(fm.get("updated", "")[:10])
+        except Exception:
+            pass
+        ref = act_date or upd
+        days = (today - ref).days if ref else None
+        rel, d_rel = relevance_band(days)
+        is_global_pref = (fm.get("type") == "preference" and "about:" not in raw_fm(path))
+        if fm.get("type") in NO_DECAY_TYPES or is_global_pref:
+            rel, d_rel = ("standing", "use")
+        # An explicit judgement outranks a day count. Something marked paused is
+        # paused whether it went quiet yesterday or last month.
+        if fm.get("status") == "paused":
+            rel, d_rel = ("paused", "confirm")
+        elif fm.get("status") in ("archived", "superseded"):
+            rel, d_rel = (fm["status"], "ignore")
+        # Only the topic's OWN node can be contradicted by activity on it. A
+        # person who merely mentions a project is not invalidated by work on it.
+        owner = match_entity(topic, ents) if topic else None
+        is_own = bool(owner and owner["id"] == fm["id"])
+        contradicted = bool(is_own and act_date and upd and act_date > upd
+                            and (today - upd).days > CURRENT_DAYS)
+        ev, d_ev = evidence_band(fm, cap_count.get(topic, 0), contradicted)
+        directive = strictest(d_rel, d_ev)
+        note = None
+        if directive == "confirm":
+            note = (f'"{days}d since activity on {topic or "this"} - confirm with the user '
+                    f'before taking this as a reference"')
+        elif directive == "verify":
+            note = f'"work continued after this was written - verify before relying on it"'
+        elif directive == "ignore":
+            note = f'"quiet {days}d - retained, not loaded unless asked for"'
+        if set_frontmatter(path, {"last_activity": ref or "unknown", "relevance": rel,
+                                  "evidence": ev, "directive": directive}, note) if args.apply else True:
+            changed += 1
+        rows.append((directive, rel, ev, topic or "-", str(path.relative_to(BRAIN))))
+
+    order = sorted(rows, key=lambda r: -STRICTNESS.get(r[0], 0))
+    counts = collections.Counter(r[0] for r in rows)
+    print(("wrote state on " if args.apply else "would set state on ") + f"{changed} files")
+    print("  " + "  ".join(f"{k}:{v}" for k, v in
+                           sorted(counts.items(), key=lambda x: STRICTNESS.get(x[0], 0))))
+    if args.verbose:
+        print()
+        for d, rel, ev, topic, p in order[:args.limit]:
+            print(f"  {d:<8}{rel:<12}{ev:<14}{topic:<18}{p}")
+
+
+DOC_DIRS = {"decision": "decisions", "preference": "preferences", "risk": "risks",
+            "constraint": "constraints", "playbook": "playbooks", "note": "notes",
+            "task": "tasks"}
+ENT_DIRS = {"task_type": "task_types", "person": "people", "org": "orgs",
+            "project": "tasks", "skill": "skills", "system": "systems"}
+
+
+def cmd_absorb(args):
+    """Dissolve the inbox into the brain. Nothing is rejected; state does the gating.
+
+    A review queue nobody walks through is not a safety mechanism, it is a queue
+    that rots. Everything enters and carries a directive saying how much weight
+    to give it — `cite` for a single capture, `confirm` once it goes quiet.
+    """
+    moved = []
+    for it in inbox_items():
+        typ = it["type"]
+        if typ in ENT_DIRS:
+            dest = BRAIN / "graph" / ENT_DIRS[typ] / it["path"].name[11:]
+        else:
+            dest = BRAIN / "wiki" / DOC_DIRS.get(typ, "notes") / it["path"].name[11:]
+        if dest.exists():
+            print(f"skip     {dest.relative_to(BRAIN)} (already there)")
+            continue
+        if args.apply:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(it["path"].read_text())
+            it["path"].unlink()
+        moved.append((typ, str(dest.relative_to(BRAIN))))
+    verb = "absorbed" if args.apply else "would absorb"
+    print(f"{verb} {len(moved)} proposals — none rejected, state decides their weight")
+    for typ, d in sorted(moved):
+        print(f"  {typ:<11}{d}")
 
 
 def cmd_digest(args):
@@ -575,7 +790,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("scan", "promote", "session-start", "digest", "export-codex"):
+    for name in ("scan", "promote", "session-start", "digest", "export-codex", "state", "absorb"):
         s = sub.add_parser(name)
         s.add_argument("--days", type=int, default=45)
         s.add_argument("--json", action="store_true")
@@ -585,9 +800,16 @@ def main():
             s.add_argument("--limit", type=int, default=30)
         if name == "session-start":
             s.add_argument("--raw", action="store_true")
+        if name == "absorb":
+            s.add_argument("--apply", action="store_true")
+        if name == "state":
+            s.add_argument("--apply", action="store_true")
+            s.add_argument("--verbose", action="store_true")
+            s.add_argument("--limit", type=int, default=40)
     a = ap.parse_args()
     {"scan": cmd_scan, "promote": cmd_promote, "session-start": cmd_session_start,
-     "digest": cmd_digest, "export-codex": cmd_export_codex}[a.cmd](a)
+     "digest": cmd_digest, "export-codex": cmd_export_codex,
+     "state": cmd_state, "absorb": cmd_absorb}[a.cmd](a)
 
 
 if __name__ == "__main__":

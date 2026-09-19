@@ -67,14 +67,16 @@ layer exists.
 
 ## Two rules that keep it trustworthy
 
-**Nothing is written without review — with one deliberate exception.** Capture proposes
-into `~/brain/inbox/`; you approve or reject. A memory that is 80% right is worse than
-none, because it degrades every later output invisibly and you cannot tell which fifth is
-wrong. The exception is repetition: a claim captured in three independent sessions across
-different days is a different kind of evidence from one confident-sounding capture, and the
-nightly pass promotes those on its own. Everything it writes is tagged `auto: true`.
+**Nothing is deleted, and nothing waits for approval.** A memory that is 80% right is
+worse than none — but a review queue nobody walks through is not the fix. It rots while the
+graph stays frozen. So everything enters the brain immediately carrying keywords that say
+how much weight to give it: `use`, `cite`, `confirm`, `verify`, `ignore`. A single capture
+is `cite` — apply it, but say it is unconfirmed. A project quiet for three weeks is
+`confirm` — ask before building on it. Nothing is ever removed; it just stops being
+loaded.
 
-**Everything expires.** Every node carries `review_by`. A brain where nothing expires rots
+**Everything expires.** Relevance and evidence are recomputed nightly from measured
+activity, and every node carries `review_by`. A brain where nothing expires rots
 quietly until a stale fact embarrasses you — and then you stop trusting all of it.
 `keel health` surfaces expiries, contradictions, broken references and unanchored
 documents.

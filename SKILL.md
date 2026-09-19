@@ -518,22 +518,73 @@ Three pieces, all deterministic — no model, no tokens. Install them once:
 3. **Codex** gets the same context through the `keel:start`/`keel:end` block in
    `~/.codex/AGENTS.md`, rewritten nightly. Text outside the markers is preserved.
 
+### State, not approval
+
+**Nothing is deleted and nothing waits for a human queue.** Everything enters the
+brain immediately and carries keywords saying how much weight to give it. A review
+gate nobody walks through is not a safety mechanism — it is a queue that rots,
+while the graph stays frozen on install day.
+
+Two **independent** axes, because a thing can be recent but unproven, or old but
+certain, and those need different answers. Conflating them is what makes lifecycle
+models unusable.
+
+**Relevance** — recency of activity on its topic, measured from transcripts:
+
+| band | when | directive |
+|---|---|---|
+| `current` | activity ≤14d | `use` |
+| `fading` | 15–60d | `confirm` |
+| `dormant` | >60d | `ignore` (retained, never deleted) |
+| `standing` | identity and global preferences | `use` |
+| `paused` / `archived` | set explicitly | `confirm` / `ignore` |
+
+**Evidence** — strength of the claim:
+
+| band | when | directive |
+|---|---|---|
+| `stated` | the user said it outright | `use` |
+| `observed` | ≥3 independent captures | `use` |
+| `inferred` | 1–2 captures, or auto-written | `cite` |
+| `contradicted` | newer activity than the content | `verify` |
+| `superseded` | explicitly replaced | `ignore` |
+
+**The stricter directive wins.** Five keywords a session acts on:
+
+```
+use     — apply it; no need to mention it
+cite    — apply it, but say it is unconfirmed
+confirm — ASK before relying on it; the work may have moved on
+verify  — content may be false; newer activity contradicts it
+ignore  — do not load unless asked; retained, never deleted
+```
+
+The legend ships in the SessionStart block, and entities needing confirmation are
+listed there by name, so a session does not have to open files to discover it must
+ask. Run `autobrain.py state --apply`; the nightly pass does it for you.
+
+**Three rules keep this honest:**
+1. **Identity does not decay.** People, orgs, skills, the profile and global
+   preferences are `standing` — a colleague's role is not made uncertain by a quiet
+   fortnight. Only work state decays.
+2. **Only a topic's own node can be contradicted** by activity on it. A person who
+   merely mentions a project is not invalidated by work on that project. Skipping
+   this flags two-thirds of the brain as suspect.
+3. **An explicit judgement outranks a day count.** `status: paused` means paused
+   whether it went quiet yesterday or last month.
+
 ### The promotion rule
 
-Repetition **and** time must both clear, because either alone is a bad signal:
-one long session is a detour, and ten passing mentions are noise.
+Repetition **and** time must both clear for a *new node*, because either alone is a
+bad signal: one long session is a detour, and ten passing mentions are noise.
 
 | promotes | when |
 |---|---|
 | a new `task` node | ≥3 sessions **and** ≥3 distinct days **and** ≥2h active, with no node |
-| an inbox document | the same `(type, tags)` cluster has ≥3 captures across ≥2 days |
 | a staleness flag | topic activity is newer than the node's `updated:` |
 
-Anything auto-written carries `auto: true`, so it can be audited or reverted with
-one grep. Single captures still wait for `/keel review` — **the gate is intact for
-exactly the case it was built for.** Repetition across independent sessions is a
-different kind of evidence from one confident-sounding capture, which is why it,
-and only it, may bypass review.
+Anything auto-written carries `auto: true` and lands as `inferred`/`cite`, so it can
+be audited or reverted with one grep.
 
 ### `autobrain.py`
 
@@ -541,6 +592,8 @@ and only it, may bypass review.
 python3 scripts/autobrain.py scan       # what was worked on vs what the brain knows
 python3 scripts/autobrain.py promote    # dry run; --apply to write
 python3 scripts/autobrain.py digest     # unclaimed sessions, to name new topics
+python3 scripts/autobrain.py state       # recompute directives; --apply to write
+python3 scripts/autobrain.py absorb      # dissolve inbox/ into the brain; --apply
 python3 scripts/autobrain.py export-codex
 ```
 
