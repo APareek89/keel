@@ -10,12 +10,15 @@ Reads Claude Code and Codex transcripts from disk. Standard library only.
 Topics are DERIVED from the graph and inbox, plus discovered n-grams, so a
 project nobody registered still shows up. Nothing leaves the machine.
 """
-import json, os, re, sys, glob, argparse, collections, datetime as dt
+import json, os, re, sys, glob, argparse, collections, contextlib, fcntl, time
+import datetime as dt
 from pathlib import Path
 
 BRAIN = Path(os.environ.get("BRAIN_DIR", os.path.expanduser("~/brain")))
 STATE = BRAIN / "_index" / "autobrain.json"
-LIVE  = BRAIN / "_index" / "live.json"      # cached topic table, refreshed nightly
+LIVE  = BRAIN / "_index" / "live.json"      # cached topic table
+TCACHE = BRAIN / "_index" / "transcripts.json"   # parsed sessions, keyed by mtime+size
+LOCK  = BRAIN / "_index" / "brain.lock"
 LIVE_TTL_HOURS = 12
 
 # Promotion thresholds: repetition AND time must both clear.
@@ -48,6 +51,26 @@ def is_human(t):
     return not any(ls.startswith(m) or m in ls[:400] for m in INJECTED)
 
 
+@contextlib.contextmanager
+def brain_lock(timeout=20):
+    """Serialise writes across the nightly pass, session hooks and the MCP server.
+    Without this, a capture landing mid-rewrite is silently lost."""
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(LOCK, "w")
+    waited = 0.0
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+        except OSError:
+            time.sleep(0.2); waited += 0.2
+            if waited >= timeout:
+                fh.close(); raise TimeoutError("brain locked by another process")
+    try:
+        yield
+    finally:
+        fcntl.flock(fh, fcntl.LOCK_UN); fh.close()
+
+
 def clean(t):
     """Strip injected context so we measure what the user actually said."""
     return RE_CMD.sub(" ", RE_SR.sub(" ", t)).lower()
@@ -70,10 +93,48 @@ def active_minutes(ts):
 
 
 # ---------------------------------------------------------------- transcripts
-def read_sessions(since_days=45):
+def _cache_load():
+    try:
+        return json.loads(TCACHE.read_text())
+    except Exception:
+        return {}
+
+
+def _cache_save(c):
+    try:
+        TCACHE.parent.mkdir(parents=True, exist_ok=True)
+        TCACHE.write_text(json.dumps(c))
+    except OSError:
+        pass
+
+
+def read_sessions(since_days=45, use_cache=True):
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=since_days)
-    out = []
+    cache = _cache_load() if use_cache else {}
+    fresh, out = {}, []
+
+    def cached(p):
+        try:
+            st = os.stat(p)
+        except OSError:
+            return None, None
+        key = f"{p}:{int(st.st_mtime)}:{st.st_size}"
+        hit = cache.get(key)
+        return key, hit
+
+    def keep(key, rec):
+        if key:
+            fresh[key] = rec
+        if rec and rec["end"] >= cutoff.isoformat():
+            out.append({"client": rec["client"],
+                        "start": dt.datetime.fromisoformat(rec["start"]),
+                        "end": dt.datetime.fromisoformat(rec["end"]),
+                        "mins": rec["mins"], "text": rec["text"]})
+    _out_marker = None
     for p in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
+        key, hit = cached(p)
+        if hit is not None:
+            keep(key, hit); continue
         ts, tx = [], []
         try:
             for line in open(p, errors="ignore"):
@@ -93,10 +154,14 @@ def read_sessions(since_days=45):
                         tx.append(c)
         except OSError:
             continue
-        if ts and max(ts) >= cutoff:
-            out.append({"client": "claude", "start": min(ts), "end": max(ts),
-                        "mins": active_minutes(ts), "text": clean(" ".join(dict.fromkeys(tx)))})
+        rec = ({"client": "claude", "start": min(ts).isoformat(), "end": max(ts).isoformat(),
+                "mins": active_minutes(ts), "text": clean(" ".join(dict.fromkeys(tx)))}
+               if ts else None)
+        keep(key, rec)
     for p in glob.glob(os.path.expanduser("~/.codex/sessions/*/*/*/*.jsonl")):
+        key, hit = cached(p)
+        if hit is not None:
+            keep(key, hit); continue
         ts, tx = [], []
         try:
             for line in open(p, errors="ignore"):
@@ -111,9 +176,12 @@ def read_sessions(since_days=45):
                            and is_human(b["text"])]
         except OSError:
             continue
-        if ts and max(ts) >= cutoff:
-            out.append({"client": "codex", "start": min(ts), "end": max(ts),
-                        "mins": active_minutes(ts), "text": clean(" ".join(dict.fromkeys(tx)))})
+        rec = ({"client": "codex", "start": min(ts).isoformat(), "end": max(ts).isoformat(),
+                "mins": active_minutes(ts), "text": clean(" ".join(dict.fromkeys(tx)))}
+               if ts else None)
+        keep(key, rec)
+    if use_cache:
+        _cache_save(fresh)
     return out
 
 
@@ -481,7 +549,9 @@ def build_context(days=14):
         r = None
         if LIVE.exists():
             age = (dt.datetime.now().timestamp() - LIVE.stat().st_mtime) / 3600
-            if age < LIVE_TTL_HOURS:
+            newest = max((p.stat().st_mtime for p in (BRAIN / "graph").rglob("*.md")),
+                         default=0)
+            if age < LIVE_TTL_HOURS and LIVE.stat().st_mtime >= newest:
                 r = json.loads(LIVE.read_text())
         if r is None:
             r = analyse(argparse.Namespace(days=days, json=False))
@@ -738,6 +808,45 @@ def cmd_absorb(args):
         print(f"  {typ:<11}{d}")
 
 
+def cmd_sync(args):
+    """Fast end-of-session pass: absorb, promote, re-state, refresh both exports.
+
+    This is what removes the day-long lag. The nightly pass used to be the only
+    thing that moved work into the brain, so two sessions on the same day could
+    not see each other. Session end is the natural moment — the work just
+    happened, and the transcript cache makes a full pass sub-second.
+    """
+    t0 = time.time()
+    quiet = args.quiet
+    try:
+        with brain_lock(timeout=5):
+            out = []
+            for fn, a in ((cmd_absorb, {"apply": True, "days": args.days}),
+                          (cmd_promote, {"apply": True, "days": args.days}),
+                          (cmd_state, {"apply": True, "days": 90, "verbose": False,
+                                       "limit": 0})):
+                import io, contextlib as _c
+                buf = io.StringIO()
+                with _c.redirect_stdout(buf):
+                    fn(argparse.Namespace(json=False, **a))
+                out.append(buf.getvalue().strip())
+            LIVE.write_text(json.dumps(analyse(argparse.Namespace(days=14, json=False)),
+                                       indent=2, default=str))
+            buf = io.StringIO()
+            with _c.redirect_stdout(buf):
+                cmd_export_codex(argparse.Namespace(days=14, json=False))
+    except TimeoutError:
+        if not quiet:
+            print("skipped — another pass is running")
+        return
+    if not quiet:
+        print(f"synced in {time.time() - t0:.1f}s")
+        for chunk in out:
+            for line in chunk.splitlines():
+                if line.strip() and "nothing above threshold" not in line:
+                    print("  " + line)
+
+
 def cmd_digest(args):
     """Sessions no topic claims — the raw material for proposing new topics."""
     sessions = read_sessions(args.days)
@@ -790,7 +899,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("scan", "promote", "session-start", "digest", "export-codex", "state", "absorb"):
+    for name in ("scan", "promote", "session-start", "digest", "export-codex", "state", "absorb", "sync"):
         s = sub.add_parser(name)
         s.add_argument("--days", type=int, default=45)
         s.add_argument("--json", action="store_true")
@@ -800,6 +909,8 @@ def main():
             s.add_argument("--limit", type=int, default=30)
         if name == "session-start":
             s.add_argument("--raw", action="store_true")
+        if name == "sync":
+            s.add_argument("--quiet", action="store_true")
         if name == "absorb":
             s.add_argument("--apply", action="store_true")
         if name == "state":
@@ -809,7 +920,7 @@ def main():
     a = ap.parse_args()
     {"scan": cmd_scan, "promote": cmd_promote, "session-start": cmd_session_start,
      "digest": cmd_digest, "export-codex": cmd_export_codex,
-     "state": cmd_state, "absorb": cmd_absorb}[a.cmd](a)
+     "state": cmd_state, "absorb": cmd_absorb, "sync": cmd_sync}[a.cmd](a)
 
 
 if __name__ == "__main__":

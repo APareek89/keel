@@ -3,6 +3,10 @@
 Keel brain tools.
 
     brain.py health          text report: staleness, orphans, capture rate, breakages
+    brain.py missing         structural gaps: decisions with no rejected alternative, etc.
+    brain.py todo            open loops and live risks
+    brain.py connectors      which connectors are new since last asked
+    brain.py export-codex    refresh the keel block in ~/.codex/AGENTS.md
     brain.py view [--no-open] writes an HTML overview + knowledge graph and opens it
 
 Reads ~/brain (override with BRAIN_DIR). Standard library only — no pip install,

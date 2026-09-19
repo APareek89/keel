@@ -18,6 +18,9 @@ import sys
 import json
 import pathlib
 import traceback
+import contextlib
+import fcntl
+import time
 from datetime import date
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -29,6 +32,43 @@ FALLBACK_PROTOCOL = "2025-06-18"
 # what a document is worth when the context budget runs out
 DOC_RANK = {"constraint": 0, "preference": 1, "decision": 2, "risk": 3,
             "playbook": 4, "task": 5, "note": 6, "commitment": 7}
+
+
+DIRECTIVE_RANK = {"use": 0, "cite": 1, "confirm": 2, "verify": 3, "ignore": 4}
+LEGEND = (
+    "**How to treat what follows.** Each item carries a `directive`:\n"
+    "- `use` — apply it; no need to mention it\n"
+    "- `cite` — apply it, but say it is unconfirmed\n"
+    "- `confirm` — **ASK the user before relying on it**; the work may have moved on\n"
+    "- `verify` — content may be false; newer activity contradicts it\n"
+    "Items marked `ignore` are withheld from this result, not deleted.\n")
+
+
+@contextlib.contextmanager
+def brain_lock(timeout=10):
+    """Serialise writes. The nightly pass rewrites frontmatter; a concurrent
+    capture must not land in the middle of that and lose."""
+    lock = brain.BRAIN / "_index" / "brain.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock, "w")
+    waited = 0.0
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            time.sleep(0.2); waited += 0.2
+            if waited >= timeout:
+                fh.close()
+                raise TimeoutError("brain is locked by another process")
+    try:
+        yield
+    finally:
+        fcntl.flock(fh, fcntl.LOCK_UN); fh.close()
+
+
+def state_of(n):
+    return (n.get("directive") or "use").strip().strip('"')
 
 
 def log(msg):
@@ -72,7 +112,7 @@ def retrieve(query, budget=6000):
         if overlap >= 2 or strong:
             scored.append((overlap + (3 if strong else 0), e))
     scored.sort(key=lambda x: -x[0])
-    anchors = [e for _, e in scored[:4]]
+    anchors = [e for _, e in scored[:4] if state_of(e) != "ignore"]
 
     # step 2 — one hop out, never through a hub
     focus = {e["id"] for e in anchors}
@@ -93,19 +133,25 @@ def retrieve(query, budget=6000):
 
     # step 3 — documents about those entities
     picked = []
+    withheld = 0
     for d in docs:
-        if d.get("status") in ("superseded", "archived"):
+        if d.get("status") in ("superseded", "archived") or state_of(d) == "ignore":
+            withheld += 1
             continue
         hits = [a for a in d.get("about", []) if a.get("entity") in focus]
         if hits:
             picked.append((DOC_RANK.get(d.get("type"), 9), d, hits[0].get("relation", "about")))
-    picked.sort(key=lambda x: (x[0], x[1].get("updated", "")))
+    # A trustworthy document outranks a merely on-topic one.
+    picked.sort(key=lambda x: (DIRECTIVE_RANK.get(state_of(x[1]), 0),
+                               x[0], x[1].get("updated", "")))
     picked = picked[:7]        # precision over recall — four right beats forty plausible
 
-    out, used = [], 0
+    out, used = [LEGEND], 0
     if anchors:
         out.append("## Anchored on\n" + "\n".join(
-            f"- **{e.get('title', e['id'])}** ({e.get('type')}) — {e['_body'].splitlines()[0][:110] if e['_body'] else ''}"
+            f"- **{e.get('title', e['id'])}** ({e.get('type')}) · `{state_of(e)}`"
+            + (f" — {e.get('state_note', '').strip(chr(34))}" if state_of(e) in ("confirm", "verify")
+               else f" — {e['_body'].splitlines()[0][:100] if e['_body'] else ''}")
             for e in anchors))
     else:
         out.append(f"No entity in the graph matched \"{query}\". "
@@ -122,7 +168,8 @@ def retrieve(query, budget=6000):
             stale = " ⚠ past review date" if (
                 (rv := brain.as_date(d.get("review_by"))) and rv < TODAY) else ""
             out.append(f"\n### {d.get('type', '?').upper()} · {d.get('title', d['id'])}"
-                       f"{stale}\n*{rel} · {d.get('confidence', '?')} confidence · "
+                       f"{stale}\n*directive: **{state_of(d)}** · {d.get('relevance', '?')} · "
+                       f"{d.get('evidence', d.get('confidence', '?'))} · {rel} · "
                        f"{d.get('_path')}*\n\n{body}")
             used += len(body)
             if used > budget:
@@ -130,6 +177,19 @@ def retrieve(query, budget=6000):
                 break
     else:
         out.append("\nNothing is written about these yet.")
+
+    gated = [x for x in ([a for a in anchors] + [d for _, d, _ in picked])
+             if state_of(x) in ("confirm", "verify")]
+    if gated:
+        out.append("\n## Before you use this\n"
+                   "These are **not** cleared for silent use — ask the user first:")
+        for g in gated:
+            note = (g.get("state_note") or "").strip('"')
+            out.append(f"- **{g.get('title', g['id'])}** (`{state_of(g)}`)"
+                       + (f" — {note}" if note else ""))
+    if withheld:
+        out.append(f"\n_{withheld} item(s) withheld as `ignore` — retained on disk, "
+                   f"ask by name if you need them._")
     return "\n".join(out)
 
 
@@ -159,23 +219,41 @@ def read_node(node_id):
     return f"No node with id `{node_id}`."
 
 
+DOC_DIRS = {"decision": "decisions", "preference": "preferences", "risk": "risks",
+            "constraint": "constraints", "playbook": "playbooks", "note": "notes",
+            "task": "tasks"}
+ENT_DIRS = {"task_type": "task_types", "person": "people", "org": "orgs",
+            "project": "tasks", "skill": "skills", "system": "systems"}
+
+
 def remember(kind, title, content, about=None, confidence="medium", review_months=6):
-    """Write a proposal to inbox/. Never straight into the brain — the review gate
-    is the only thing between a useful brain and a poisoned one."""
+    """Write straight into the brain, marked as unconfirmed.
+
+    There is no review queue any more: one that nobody walks through is not a
+    safety mechanism, it is a queue that rots while the graph stays frozen. A
+    single capture lands as `evidence: inferred` / `directive: cite`, so a later
+    session applies it but says it is unconfirmed. The nightly pass promotes it
+    to `observed` once the same thing shows up in three independent sessions,
+    and demotes it to `confirm` when the work goes quiet. Nothing is deleted.
+    """
     slug = "".join(c if c.isalnum() else "-" for c in title.lower()).strip("-")[:60]
     slug = "-".join(p for p in slug.split("-") if p)
-    inbox = brain.BRAIN / "inbox"
-    inbox.mkdir(parents=True, exist_ok=True)
-    path = inbox / f"{TODAY}-{kind}-{slug}.md"
+    if kind in ENT_DIRS:
+        dest_dir = brain.BRAIN / "graph" / ENT_DIRS[kind]
+    else:
+        dest_dir = brain.BRAIN / "wiki" / DOC_DIRS.get(kind, "notes")
+    path = dest_dir / f"{slug}.md"
 
     yr, mo = TODAY.year, TODAY.month + review_months
     yr, mo = yr + (mo - 1) // 12, (mo - 1) % 12 + 1
     review = f"{yr}-{mo:02d}-{min(TODAY.day, 28):02d}"
 
-    fm = [f"id: {kind}-{slug}", f"type: {kind}", f"title: {title}",
-          "status: active", f"confidence: {confidence}", "scope: personal",
-          "provenance: mcp:session", f"created: {TODAY}", f"updated: {TODAY}",
-          f"review_by: {review}"]
+    fm = [f"id: {kind}-{slug}", f"type: {kind}",
+          f"last_activity: {TODAY}", "relevance: current",
+          "evidence: inferred", "directive: cite",
+          f"title: {title}", "status: active", f"confidence: {confidence}",
+          "scope: personal", "provenance: mcp:session", f"created: {TODAY}",
+          f"updated: {TODAY}", f"review_by: {review}"]
     valid = {n["id"] for n in brain.load_nodes()}
     refs = [a for a in (about or []) if a.get("entity") in valid]
     dropped = [a.get("entity") for a in (about or []) if a.get("entity") not in valid]
@@ -185,13 +263,44 @@ def remember(kind, title, content, about=None, confidence="medium", review_month
             fm += [f"  - relation: {a.get('relation', 'concerns')}",
                    f"    entity: {a['entity']}"]
 
-    path.write_text("---\n" + "\n".join(fm) + "\n---\n\n" + content.strip() + "\n")
-    msg = f"Proposed → {path.relative_to(brain.BRAIN)}\nNot in the brain until approved (`/keel review`)."
+    try:
+        with brain_lock():
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                path = dest_dir / f"{slug}-{TODAY}.md"
+            path.write_text("---\n" + "\n".join(fm) + "\n---\n\n"
+                            + content.strip() + "\n")
+    except TimeoutError:
+        return ("Could not write — the brain is locked by the nightly pass. "
+                "Try again in a moment.")
+
+    msg = (f"Written → {path.relative_to(brain.BRAIN)}\n"
+           f"In the brain now, as `directive: cite` — a session will apply it but say "
+           f"it is unconfirmed until it recurs in three independent sessions.")
     if dropped:
         msg += f"\n⚠ dropped unknown entities: {', '.join(dropped)}"
     if not refs:
-        msg += "\n⚠ no graph anchor — this will be findable by search only."
+        msg += "\n⚠ no graph anchor — findable by search only."
     return msg
+
+
+def pending_confirmations():
+    """Everything the brain will not let a session use silently."""
+    rows = []
+    for n in brain.load_nodes():
+        d = state_of(n)
+        if d in ("confirm", "verify"):
+            rows.append((DIRECTIVE_RANK[d], d, n))
+    if not rows:
+        return "Nothing is gated — every item in the brain is cleared for use."
+    rows.sort(key=lambda r: -r[0])
+    out = ["These need the user's confirmation before you rely on them:\n"]
+    for _, d, n in rows:
+        note = (n.get("state_note") or "").strip('"')
+        out.append(f"- **{n.get('title', n['id'])}** (`{n.get('type')}`) — `{d}`"
+                   + (f"\n    {note}" if note else ""))
+    out.append("\nAsk once, in one line, naming what you want to use it for.")
+    return "\n".join(out)
 
 
 def run_report(fn):
@@ -216,7 +325,8 @@ TOOLS = [
          "budget": {"type": "integer", "description": "Max characters of document text (default 6000)."}},
          "required": ["query"]}},
     {"name": "keel_remember",
-     "description": "Capture something worth keeping into the review inbox: a decision with its "
+     "description": "Capture something worth keeping. It goes straight into the brain marked "
+                    "unconfirmed (directive: cite) — there is no review queue. A decision with its "
                     "rejected alternative, a constraint, a scoped preference, a risk with a review "
                     "date, a person fact, a playbook. Never writes into the brain directly — the "
                     "user approves first.",
@@ -241,6 +351,12 @@ TOOLS = [
      "description": "Read one node in full by its id.",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}},
                      "required": ["id"]}},
+    {"name": "keel_pending",
+     "description": "List everything in the brain that must NOT be used silently — items "
+                    "whose topic has gone quiet, or whose content newer activity "
+                    "contradicts. Call this when starting substantive work so you know "
+                    "what to ask about before you rely on it.",
+     "inputSchema": {"type": "object", "properties": {}}},
     {"name": "keel_health",
      "description": "Is the brain still being fed, still true, still retrievable? Reports "
                     "staleness, broken references, unanchored documents and capture rate.",
@@ -266,6 +382,8 @@ def call_tool(name, args):
         return list_entities(args.get("kind"))
     if name == "keel_read":
         return read_node(args["id"])
+    if name == "keel_pending":
+        return pending_confirmations()
     if name == "keel_health":
         return run_report(brain.cmd_health)
     if name == "keel_missing":

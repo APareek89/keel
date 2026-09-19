@@ -60,12 +60,13 @@ Keel — what would you like?
   /keel brain      Visual map of everything it knows
   /keel health     Is it being fed, still true, still retrievable?
   /keel missing    What it should know and doesn't
-  /keel review     Approve or reject captured proposals   (N waiting)
+  /keel pending    What it will not use without asking you   (N gated)
   /keel remember   Capture something from this conversation
 ```
 
-Fill in N from the file count in `~/brain/inbox/`. Print it and stop — no
-commentary, and don't recommend which to pick unless asked.
+Fill in N from `autobrain.py state` — the count of items on `confirm` or
+`verify`. Print it and stop — no commentary, and don't recommend which to pick
+unless asked.
 
 ---
 
@@ -79,8 +80,9 @@ this turn.
   a sequence, not a clarifying follow-up. One.
 - **Don't narrate while working.** No "now reading the Codex sessions…". Work, then
   report once at the end.
-- **Don't ask what to do with what you find.** Everything becomes an inbox proposal.
-  That *is* the review step, and it happens later, when they chooses.
+- **Don't ask what to do with what you find.** Everything is staged in `inbox/`
+  and drained into the brain by the next pass, labelled `inferred`/`cite`. The
+  labels do the gating, not a conversation.
 - **Never stop midway to ask.** If a source is slow, unparseable or empty, skip it
   and mention it in the closing summary.
 
@@ -130,9 +132,9 @@ request from them.
 | Exports they already has | `~/Downloads/*.zip` matching `chatgpt`/`conversations`/`claude*export` | Only these name patterns. Never a general Downloads scan. |
 
 **Read order matters.** Start with Claude Code memory (structured, instant), then
-Claude Code sessions (richest signal), then Codex sessions. Stop when the inbox has
-enough for one review sitting — a hundred proposals they'll never get through is worse
-than twenty they will.
+Claude Code sessions (richest signal), then Codex sessions. Breadth beats depth on
+the first pass — everything lands labelled as unconfirmed, and repetition promotes
+what turns out to matter.
 
 **The flow.** Use AskUserQuestion so they can pick with a click:
 
@@ -147,10 +149,10 @@ than twenty they will.
 
 Multi-select. Nothing is mandatory; skipping every source is a valid answer.
 
-Then process what they chose into `~/brain/inbox/` as proposals, never straight into
-the brain. Expect a large first batch; group the review by type so approving is fast.
-Aim for breadth over depth on the first pass: a thin `person` node for everyone who
-matters beats a rich node for one.
+Then stage what they chose into `~/brain/inbox/` and run
+`autobrain.py sync`, which drains it into the brain labelled `inferred`/`cite`.
+Aim for breadth over depth: a thin `person` node for everyone who matters beats a
+rich node for one.
 
 Finally write the setup marker so the menu stops offering this:
 
@@ -240,13 +242,16 @@ If nothing relevant exists, say so plainly rather than padding with tangential f
 
 ## Capture (`remember`)
 
-**Nothing is written straight into the brain.** Proposals go to `~/brain/inbox/`
-as `YYYY-MM-DD-<slug>.md` and wait for review.
+**Write it into the brain immediately, marked unconfirmed.** There is no review
+queue. One that nobody walks through is not a safety mechanism — it is a queue
+that rots while the graph stays frozen on install day.
 
-A memory that is 80% right is worse than none: it degrades every future output
-invisibly and they have no way to tell which fifth is wrong. The review gate is the
-only thing between a useful brain and a poisoned one. Don't bypass it, even when
-the fact seems obviously correct.
+A memory that is 80% right is still worse than none, so the protection moved from
+a gate to a label: a single capture lands as `evidence: inferred` /
+`directive: cite`, which tells a later session to apply it *but say it is
+unconfirmed*. Three independent captures make it `observed` and it stops being
+hedged. Quiet for a fortnight and it becomes `confirm`, so a session asks before
+relying on it. Nothing is ever deleted.
 
 **The test for keeping something: will it change what I do in a future session?**
 
@@ -294,23 +299,30 @@ One page, in this order. Skip empty blocks rather than padding them.
 5. **Inbox triage** — filter connector deltas against the graph. Surface mail from
    people and projects they owns; count the rest rather than listing it.
 6. **Needs a look** — run `brain.py health` and report only what it flags.
-7. **Approve queue** — count in `~/brain/inbox/`.
+7. **Gated** — items on `confirm` or `verify`. One line each, and ask.
 
 Every block should retire an item, flag a slip, or ask a one-line question. A brief
 that only ever adds to their list gets abandoned within a fortnight.
 
 ---
 
-## Review
+## Pending
 
-Read each file in `~/brain/inbox/`. Show a compact summary — type, claim, source,
-confidence — and take their call one at a time. Group by type when the batch is large.
+There is nothing to approve. `autobrain.py state` keeps every item labelled, and
+this command shows the ones the brain will not let you use silently:
 
-On approval: move the file to the right directory and **add the reciprocal edge** to
-anything it points at. On rejection: delete it. If they edits it, keep their wording
-verbatim — their phrasing of their own preferences beats yours.
+```bash
+python3 ~/.claude/skills/keel/scripts/autobrain.py state --verbose
+```
 
----
+Everything on `confirm` has gone quiet for 15–60 days; everything on `verify` has
+work that continued after it was written. Both mean the same thing operationally:
+**ask the user in one line before relying on it**, naming what you want it for.
+
+When they answer, act on it rather than just reporting — still true, so bump
+`updated:`; moved on, so rewrite it and keep the superseded text in a dated
+`<details>` block; finished, so set `status: archived` and it stops loading while
+staying on disk.
 
 ## Health, Missing, To-do, Brain
 
@@ -492,7 +504,8 @@ retrieved.
   wiki/                     ← documents. prose, unbounded, read.
     decisions/  risks/  constraints/  preferences/  playbooks/  tasks/  notes/
   loops/                    ← structured state: owed.md, waiting-on.md
-  inbox/  _templates/  _index/
+  inbox/                    ← staging only; drained by `sync`, never a queue
+  _templates/  _index/
 ```
 
 The split is visible in the filesystem on purpose: it forces the question at

@@ -147,10 +147,32 @@ type anything. Add to `~/.claude/settings.json`:
 }
 ```
 
-It also appends a **live-topics block** — what you have actually spent time on lately, and
+It ships the directive legend and names anything gated, then appends a
+**live-topics block** — what you have actually spent time on lately, and
 whether the brain is behind it. Reads a 12h cache, so it costs ~80ms. It fails silently and
 exits 0 if the brain is missing, so a broken hook never blocks a session.
 (`scripts/session_start.py` is a shim onto the same code, for existing installs.)
+
+### Live, in every client
+
+Three wires, and the brain stops being a daily snapshot:
+
+```bash
+# 1. context at session start (Claude Code, desktop and VS Code)
+#    hooks.SessionStart -> autobrain.py session-start
+# 2. capture at session end — this is what removes the day-long lag
+#    hooks.SessionEnd   -> autobrain.py sync --quiet
+# 3. live lookups mid-session, both clients
+#    mcpServers.keel    -> scripts/mcp_server.py
+```
+
+`sync` absorbs, promotes, re-states and refreshes both exports in under two
+seconds, because parsed transcripts are cached by mtime. Without wire 2, two
+sessions on the same day cannot see each other's work.
+
+Every write takes an exclusive `flock` on `~/brain/_index/brain.lock`, so the
+nightly pass, a session hook and an MCP capture cannot interleave and lose one
+another's changes.
 
 ### MCP server — one brain, every client
 
