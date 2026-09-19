@@ -187,6 +187,18 @@ there. Remote MCP would fix it and is deliberately not built: hosting other
 people's brains means auth, storage and a privacy surface, which is a company
 rather than a tool you can `git clone`.
 
+### Keeping both clients in sync
+
+Claude Code and Codex each keep their own copy of the skill, and they drift. Run this after
+every change, from a checkout:
+
+```bash
+./scripts/sync-clients.sh
+```
+
+It backs up each client directory before overwriting, and skips clients that do not have
+the skill installed.
+
 ### Codex skill
 
 Codex has no session-start hook, so its always-loaded file *is* the hook:
