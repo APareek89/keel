@@ -504,10 +504,67 @@ Templates are in `_templates/`. Copy one rather than writing frontmatter from me
 
 ## What runs automatically
 
-A SessionStart hook loads `profile.md` and `preferences/` into every session — those
-are already in context before you read this. Everything else runs when invoked.
+Three pieces, all deterministic — no model, no tokens. Install them once:
 
-Not yet built, in the order it would pay off: a **scheduled agent** for the nightly
-capture pass and the morning brief, and an **MCP server** holding a graph index so
-retrieval is instant and the same brain works from Codex and Cursor. Say so plainly
-if they ask — don't imply more automation than exists.
+1. **SessionStart hook** → `autobrain.py session-start`. Loads `profile.md`,
+   everything in `preferences/`, and a **live-topics block** measured from the
+   user's own Claude Code and Codex transcripts. Emits the hook JSON envelope,
+   reads a 12h cache, costs ~80ms. A node whose topic shows activity newer than
+   its `updated:` is marked stale there — when you are about to rely on one, ask
+   first. (`scripts/session_start.py` is a shim onto the same code.)
+2. **Nightly pass** — `scripts/nightly.sh`, run by cron or a launchd agent.
+   Runs `promote --apply`, `export-codex`, `view`. Logs to
+   `~/brain/_index/nightly.log`.
+3. **Codex** gets the same context through the `keel:start`/`keel:end` block in
+   `~/.codex/AGENTS.md`, rewritten nightly. Text outside the markers is preserved.
+
+### The promotion rule
+
+Repetition **and** time must both clear, because either alone is a bad signal:
+one long session is a detour, and ten passing mentions are noise.
+
+| promotes | when |
+|---|---|
+| a new `task` node | ≥3 sessions **and** ≥3 distinct days **and** ≥2h active, with no node |
+| an inbox document | the same `(type, tags)` cluster has ≥3 captures across ≥2 days |
+| a staleness flag | topic activity is newer than the node's `updated:` |
+
+Anything auto-written carries `auto: true`, so it can be audited or reverted with
+one grep. Single captures still wait for `/keel review` — **the gate is intact for
+exactly the case it was built for.** Repetition across independent sessions is a
+different kind of evidence from one confident-sounding capture, which is why it,
+and only it, may bypass review.
+
+### `autobrain.py`
+
+```bash
+python3 scripts/autobrain.py scan       # what was worked on vs what the brain knows
+python3 scripts/autobrain.py promote    # dry run; --apply to write
+python3 scripts/autobrain.py digest     # unclaimed sessions, to name new topics
+python3 scripts/autobrain.py export-codex
+```
+
+**The division of labour matters.** The script counts — deterministic, exact,
+free. It never writes prose, because no amount of pattern-matching can tell that
+"employment ends 10 September" stopped being true. It flags the node; a session
+rewrites it, moving superseded text into a dated `<details>` block rather than
+deleting it.
+
+### Two things that will bite
+
+**The lexicon is where matching lives or dies.** `~/brain/_index/lexicon.json`
+maps topics to the phrases the user actually types — they say "cover letter",
+never "job search". Without it, matching silently under-reports. It is also where
+matching goes *wrong*: one generic word there merges unrelated topics into
+identical hour counts, which looks like working data and is not. A single shared
+tag once fused three separate projects this way. Keep phrases distinctive; run
+`digest` to find work no topic claims yet. See `examples/lexicon.example.json`.
+
+**Transcripts are not user speech.** A `type:user` record contains injected skill
+text, pastes, command output and tool results. Counting those produces confident
+nonsense — topics like "script" and "review" with a hundred sessions each.
+`is_human()` filters them; don't remove it.
+
+**Still not built:** a graph index in the MCP server so retrieval is instant and
+the same brain works from Cursor. Say so plainly if asked — don't imply more
+automation than exists.

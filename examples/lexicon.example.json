@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy to ~/brain/_index/lexicon.json. Topic -> the phrases the user actually types. The scan counts; this file supplies the vocabulary. Without it, matching under-reports badly: people say 'cover letter', never 'job search'.",
+  "_warning": "Keep every phrase distinctive. One generic word here silently MERGES unrelated topics into identical figures, which looks like working data and is not.",
+  "topics": {
+    "client-work":   ["client name", "engagement code", "steerco", "workshop deck"],
+    "job-search":    ["cover letter", "my cv", "take-home", "recruiter", "referral"],
+    "side-project":  ["project codename", "the prototype"]
+  },
+  "entity_map": {
+    "client-work": "project-engagement-orion"
+  }
+}
