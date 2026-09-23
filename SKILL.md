@@ -558,6 +558,8 @@ models unusable.
 | `fading` | 15–60d | `confirm` |
 | `dormant` | >60d | `ignore` (retained, never deleted) |
 | `standing` | identity and global preferences | `use` |
+| `imminent` | a `deadline:` within 45 days | `use` — and named in every session |
+| `expired` | a `deadline:` in the past | `verify` — find out what happened |
 | `paused` / `archived` | set explicitly | `confirm` / `ignore` |
 
 **Evidence** — strength of the claim:
@@ -593,6 +595,11 @@ ask. Run `autobrain.py state --apply`; the nightly pass does it for you.
    this flags two-thirds of the brain as suspect.
 3. **An explicit judgement outranks a day count.** `status: paused` means paused
    whether it went quiet yesterday or last month.
+4. **A deadline inverts decay.** Recency is the wrong proxy for anything with a
+   date: a fallback that triggers in eight days was being faded out for going
+   quiet, exactly when it mattered most. Put `deadline: YYYY-MM-DD` on it and it
+   loads into every session with the days remaining, until it passes — then it
+   becomes `verify`, because an unresolved deadline is a question, not a fact.
 
 ### The promotion rule
 

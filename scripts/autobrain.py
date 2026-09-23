@@ -382,13 +382,26 @@ def analyse(args):
             promo.append({"type": typ, "tags": list(tags), "count": len(items),
                           "days": len(days), "paths": [str(i["path"]) for i in items]})
     promo.sort(key=lambda p: -p["count"])
+    deadlines = []
+    for path in sorted(list((BRAIN / "graph").rglob("*.md"))
+                       + list((BRAIN / "wiki").rglob("*.md"))):
+        fm, _ = load_md(path)
+        if fm.get("relevance") in ("imminent", "expired") and fm.get("id"):
+            try:
+                dleft = int(fm.get("days_left", 0))
+            except Exception:
+                dleft = 0
+            deadlines.append({"id": fm["id"], "title": fm.get("title", fm["id"]),
+                              "days": dleft, "date": fm.get("deadline", "")})
+    deadlines.sort(key=lambda d: d["days"])
+
     gated = []
     for path in sorted(list((BRAIN / "graph").rglob("*.md"))):
         fm, _ = load_md(path)
         if fm.get("directive") in ("confirm", "verify") and fm.get("id"):
             gated.append({"id": fm["id"],
                           "note": (fm.get("state_note", "") or fm.get("relevance", "")).strip('"')})
-    return {"gated": gated, "rows": rows, "unmatched_hours": round(unmatched / 60, 1),
+    return {"deadlines": deadlines, "gated": gated, "rows": rows, "unmatched_hours": round(unmatched / 60, 1),
             "sessions": len(sessions), "inbox_total": len(inbox),
             "inbox_clusters": promo, "lexicon_size": len(lexicon)}
 
@@ -586,6 +599,16 @@ def build_context(days=14):
             r = analyse(argparse.Namespace(days=days, json=False))
             LIVE.parent.mkdir(parents=True, exist_ok=True)
             LIVE.write_text(json.dumps(r, indent=2, default=str))
+        dls = r.get("deadlines", [])
+        if dls:
+            lines = ["\n## Live deadlines — these do not fade\n"]
+            for d in dls[:5]:
+                if d["days"] < 0:
+                    lines.append(f"- **{d['title']}** — passed {abs(d['days'])}d ago "
+                                 f"({d['date']}); verify what happened")
+                else:
+                    lines.append(f"- **{d['title']}** — **{d['days']} days** ({d['date']})")
+            live_block += "\n".join(lines) + "\n"
         live = [x for x in r["rows"] if x["hours"] >= 1][:6]
         if live:
             lines = [f"\n## Live topics (last {days} days, measured from your own sessions)\n"]
@@ -609,7 +632,7 @@ def build_context(days=14):
                         lines.append(f"- `{g['id']}` ({g['note']})")
             except Exception:
                 pass
-            live_block = "\n".join(lines)
+            live_block += "\n".join(lines)
     except Exception:
         pass
     if dropped:
@@ -650,8 +673,13 @@ CURRENT_DAYS, FADING_DAYS = 14, 60
 # by a quiet fortnight. Only work state decays. Global preferences and the profile
 # are loaded every session by the hook; gating them behind `confirm` is absurd.
 NO_DECAY_TYPES = {"profile", "person", "org", "skill"}
+# A dated commitment does the opposite of decaying: the closer the date, the more
+# it matters. Recency is the wrong proxy for anything with a deadline — a fallback
+# that triggers in eight days was being faded out for going quiet.
+DEADLINE_SOON_DAYS = 45
 STRICTNESS = {"use": 0, "cite": 1, "confirm": 2, "verify": 3, "ignore": 4}
-MANAGED = ("last_activity", "relevance", "evidence", "directive", "state_note")
+MANAGED = ("last_activity", "relevance", "evidence", "directive", "state_note",
+           "days_left")
 
 DIRECTIVE_LEGEND = """\
 How to read the `directive:` on anything in this brain:
@@ -767,11 +795,26 @@ def cmd_state(args):
         is_global_pref = (fm.get("type") == "preference" and "about:" not in raw_fm(path))
         if fm.get("type") in NO_DECAY_TYPES or is_global_pref:
             rel, d_rel = ("standing", "use")
+        # A live deadline overrides everything below it.
+        days_left = None
+        try:
+            dl = dt.date.fromisoformat((fm.get("deadline") or "")[:10])
+            days_left = (dl - today).days
+        except Exception:
+            dl = None
+        if dl is not None:
+            if days_left < 0:
+                rel, d_rel = ("expired", "verify")
+            elif days_left <= DEADLINE_SOON_DAYS:
+                rel, d_rel = ("imminent", "use")
+            else:
+                rel, d_rel = ("scheduled", "use")
+
         # An explicit judgement outranks a day count. Something marked paused is
         # paused whether it went quiet yesterday or last month.
-        if fm.get("status") == "paused":
+        if dl is None and fm.get("status") == "paused":
             rel, d_rel = ("paused", "confirm")
-        elif fm.get("status") in ("archived", "superseded"):
+        elif dl is None and fm.get("status") in ("archived", "superseded"):
             rel, d_rel = (fm["status"], "ignore")
         # Only the topic's OWN node can be contradicted by activity on it. A
         # person who merely mentions a project is not invalidated by work on it.
@@ -782,15 +825,22 @@ def cmd_state(args):
         ev, d_ev = evidence_band(fm, cap_count.get(topic, 0), contradicted)
         directive = strictest(d_rel, d_ev)
         note = None
-        if directive == "confirm":
+        if days_left is not None and days_left >= 0 and days_left <= DEADLINE_SOON_DAYS:
+            note = f'"DEADLINE in {days_left} days ({fm.get(chr(100)+chr(101)+chr(97)+chr(100)+chr(108)+chr(105)+chr(110)+chr(101))}) - load this even if the topic is quiet"'
+        elif days_left is not None and days_left < 0:
+            note = f'"deadline passed {abs(days_left)} days ago - verify what actually happened"'
+        elif directive == "confirm":
             note = (f'"{days}d since activity on {topic or "this"} - confirm with the user '
                     f'before taking this as a reference"')
         elif directive == "verify":
             note = f'"work continued after this was written - verify before relying on it"'
         elif directive == "ignore":
             note = f'"quiet {days}d - retained, not loaded unless asked for"'
-        if set_frontmatter(path, {"last_activity": ref or "unknown", "relevance": rel,
-                                  "evidence": ev, "directive": directive}, note) if args.apply else True:
+        vals = {"last_activity": ref or "unknown", "relevance": rel,
+                "evidence": ev, "directive": directive}
+        if days_left is not None:
+            vals["days_left"] = days_left
+        if set_frontmatter(path, vals, note) if args.apply else True:
             changed += 1
         rows.append((directive, rel, ev, topic or "-", str(path.relative_to(BRAIN))))
 
