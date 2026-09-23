@@ -382,6 +382,12 @@ def analyse(args):
             promo.append({"type": typ, "tags": list(tags), "count": len(items),
                           "days": len(days), "paths": [str(i["path"]) for i in items]})
     promo.sort(key=lambda p: -p["count"])
+    drift_n = 0
+    for path in (BRAIN / "wiki").rglob("*.md"):
+        fm, _ = load_md(path)
+        if fm.get("drift_candidate") and fm.get("status") != "superseded":
+            drift_n += 1
+
     deadlines = []
     for path in sorted(list((BRAIN / "graph").rglob("*.md"))
                        + list((BRAIN / "wiki").rglob("*.md"))):
@@ -401,7 +407,7 @@ def analyse(args):
         if fm.get("directive") in ("confirm", "verify") and fm.get("id"):
             gated.append({"id": fm["id"],
                           "note": (fm.get("state_note", "") or fm.get("relevance", "")).strip('"')})
-    return {"deadlines": deadlines, "gated": gated, "rows": rows, "unmatched_hours": round(unmatched / 60, 1),
+    return {"drift_n": drift_n, "deadlines": deadlines, "gated": gated, "rows": rows, "unmatched_hours": round(unmatched / 60, 1),
             "sessions": len(sessions), "inbox_total": len(inbox),
             "inbox_clusters": promo, "lexicon_size": len(lexicon)}
 
@@ -623,6 +629,12 @@ def build_context(days=14):
             lines.append(
                 "\nIf this session's work matches one of these, say in one line what you "
                 "loaded from the brain.")
+            if r.get("drift_n"):
+                lines.append(
+                    f"\n{r['drift_n']} decision(s)/rule(s) were written before their topic "
+                    f"moved on. Timing cannot tell whether they still hold, so they are not "
+                    f"auto-flagged. If this session relies on one, read it against what was "
+                    f"actually agreed rather than assuming — `autobrain.py drift` lists them.")
             try:
                 gated = [x for x in r.get("gated", [])]
                 if gated:
@@ -677,9 +689,14 @@ NO_DECAY_TYPES = {"profile", "person", "org", "skill"}
 # it matters. Recency is the wrong proxy for anything with a deadline — a fallback
 # that triggers in eight days was being faded out for going quiet.
 DEADLINE_SOON_DAYS = 45
+# Types that ASSERT something. A note can age harmlessly; a decision that no
+# longer matches what was agreed is actively wrong, and being on an active topic
+# makes it MORE dangerous, not less — activity is when agreements get reversed.
+ASSERTIVE = {"decision", "constraint", "preference", "playbook"}
+DRIFT_DAYS = 14
 STRICTNESS = {"use": 0, "cite": 1, "confirm": 2, "verify": 3, "ignore": 4}
 MANAGED = ("last_activity", "relevance", "evidence", "directive", "state_note",
-           "days_left")
+           "days_left", "drift_candidate")
 
 DIRECTIVE_LEGEND = """\
 How to read the `directive:` on anything in this brain:
@@ -706,6 +723,7 @@ def evidence_band(fm, captures, contradicted):
         return "superseded", "ignore"
     if contradicted:
         return "contradicted", "verify"
+
     if (fm.get("confidence", "") or "").lower() == "high" and fm.get("auto") != "true":
         return "stated", "use"          # written because the user said so
     if captures >= MIN_CAPTURES:
@@ -822,6 +840,21 @@ def cmd_state(args):
         is_own = bool(owner and owner["id"] == fm["id"])
         contradicted = bool(is_own and act_date and upd and act_date > upd
                             and (today - upd).days > CURRENT_DAYS)
+
+        # Documents are never a topic's own node, so the rule above could never
+        # fire for them — which let a decision stating the exact opposite of what
+        # was agreed sit at `use` for four days. An assertive document whose topic
+        # kept moving after it was written has DRIFTED: not known-false, but no
+        # longer known-true. A `reviewed:` stamp later than `updated:` clears it.
+        reviewed = None
+        try:
+            reviewed = dt.date.fromisoformat((fm.get("reviewed") or "")[:10])
+        except Exception:
+            pass
+        drifted = bool(fm.get("type") in ASSERTIVE and act_date and upd
+                       and not is_own and days_left is None
+                       and (act_date - upd).days > DRIFT_DAYS
+                       and not (reviewed and reviewed >= act_date))
         ev, d_ev = evidence_band(fm, cap_count.get(topic, 0), contradicted)
         directive = strictest(d_rel, d_ev)
         note = None
@@ -840,18 +873,24 @@ def cmd_state(args):
                 "evidence": ev, "directive": directive}
         if days_left is not None:
             vals["days_left"] = days_left
+        if drifted:
+            vals["drift_candidate"] = act_date
         if set_frontmatter(path, vals, note) if args.apply else True:
             changed += 1
-        rows.append((directive, rel, ev, topic or "-", str(path.relative_to(BRAIN))))
+        rows.append((directive, rel, ev, topic or "-", str(path.relative_to(BRAIN)),
+                     drifted))
 
     order = sorted(rows, key=lambda r: -STRICTNESS.get(r[0], 0))
     counts = collections.Counter(r[0] for r in rows)
+    ndrift = sum(1 for r in rows if r[5])
     print(("wrote state on " if args.apply else "would set state on ") + f"{changed} files")
     print("  " + "  ".join(f"{k}:{v}" for k, v in
                            sorted(counts.items(), key=lambda x: STRICTNESS.get(x[0], 0))))
+    if ndrift:
+        print(f"  {ndrift} assertive doc(s) whose topic moved on — `autobrain.py drift`")
     if args.verbose:
         print()
-        for d, rel, ev, topic, p in order[:args.limit]:
+        for d, rel, ev, topic, p, _dr in order[:args.limit]:
             print(f"  {d:<8}{rel:<12}{ev:<14}{topic:<18}{p}")
 
 
@@ -929,6 +968,37 @@ def cmd_sync(args):
                     print("  " + line)
 
 
+def cmd_drift(args):
+    """Assertive documents whose topic kept moving after they were written.
+
+    Timing cannot tell "still true, work continued" from "quietly reversed" — so
+    this does NOT change the directive. Flagging thirteen to catch one is how a
+    warning gets ignored. It nominates candidates; a session reads them against
+    what was actually agreed and either stamps `reviewed:` or supersedes them.
+    """
+    rows = []
+    for path in sorted(list((BRAIN / "wiki").rglob("*.md"))):
+        fm, body = load_md(path)
+        if not fm.get("drift_candidate") or fm.get("status") == "superseded":
+            continue
+        rows.append((fm.get("drift_candidate", ""), fm.get("type", "?"),
+                     fm.get("title", path.stem), fm.get("updated", "?"),
+                     str(path.relative_to(BRAIN))))
+    if not rows:
+        print("Nothing has drifted — every assertive document is newer than the "
+              "work on its topic.")
+        return
+    rows.sort()
+    print(f"{len(rows)} document(s) written before their topic moved on.\n"
+          f"Read each against what was actually agreed, then either:\n"
+          f"  still true  -> add `reviewed: {dt.date.today()}` to its frontmatter\n"
+          f"  changed     -> write the new one, set supersedes/superseded_by\n")
+    for act, typ, title, upd, p in rows:
+        print(f"  {typ:<11} written {upd}, topic active to {act}")
+        print(f"  {'':<11} {title}")
+        print(f"  {'':<11} {p}\n")
+
+
 def cmd_digest(args):
     """Sessions no topic claims — the raw material for proposing new topics."""
     sessions = read_sessions(args.days)
@@ -981,7 +1051,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("scan", "promote", "session-start", "digest", "export-codex", "state", "absorb", "sync"):
+    for name in ("scan", "promote", "session-start", "digest", "export-codex", "state", "absorb", "sync", "drift"):
         s = sub.add_parser(name)
         s.add_argument("--days", type=int, default=45)
         s.add_argument("--json", action="store_true")
@@ -1002,7 +1072,8 @@ def main():
     a = ap.parse_args()
     {"scan": cmd_scan, "promote": cmd_promote, "session-start": cmd_session_start,
      "digest": cmd_digest, "export-codex": cmd_export_codex,
-     "state": cmd_state, "absorb": cmd_absorb, "sync": cmd_sync}[a.cmd](a)
+     "state": cmd_state, "absorb": cmd_absorb, "sync": cmd_sync,
+     "drift": cmd_drift}[a.cmd](a)
 
 
 if __name__ == "__main__":

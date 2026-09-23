@@ -572,6 +572,21 @@ models unusable.
 | `contradicted` | newer activity than the content | `verify` |
 | `superseded` | explicitly replaced | `ignore` |
 
+**Drift is tracked separately, and deliberately does not change the directive.**
+An assertive document — decision, constraint, preference, playbook — whose topic
+kept moving for more than 14 days after it was written is a `drift_candidate`.
+Timing cannot distinguish "still true, work continued" from "quietly reversed",
+so flagging all of them `verify` would mean 13 warnings to catch 1, which is how
+a directive gets ignored. The script nominates; a session adjudicates:
+
+```bash
+python3 scripts/autobrain.py drift
+```
+
+Still true → add `reviewed: YYYY-MM-DD`. Changed → write the new document and set
+`supersedes` / `superseded_by`; never edit the old one into agreement, because the
+rejected alternative is the valuable half of a decision.
+
 **The stricter directive wins.** Five keywords a session acts on:
 
 ```
@@ -595,7 +610,14 @@ ask. Run `autobrain.py state --apply`; the nightly pass does it for you.
    this flags two-thirds of the brain as suspect.
 3. **An explicit judgement outranks a day count.** `status: paused` means paused
    whether it went quiet yesterday or last month.
-4. **A deadline inverts decay.** Recency is the wrong proxy for anything with a
+4. **Recency is not correctness — and for a decision it is nearly the opposite.**
+   A decision on a busy topic scores `current`/`stated`/`use` and is applied
+   silently, yet a busy topic is exactly where agreements get reversed. This is
+   not hypothetical: the decision mandating this skill's own review gate sat at
+   `use` for four days after the gate was removed, *because* the work was active.
+   Contradiction detection could never catch it — that rule required the file to
+   be its topic's own entity node, which no document ever is.
+5. **A deadline inverts decay.** Recency is the wrong proxy for anything with a
    date: a fallback that triggers in eight days was being faded out for going
    quiet, exactly when it mattered most. Put `deadline: YYYY-MM-DD` on it and it
    loads into every session with the days remaining, until it passes — then it
