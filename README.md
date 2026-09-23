@@ -67,11 +67,16 @@ layer exists.
 
 ## Two rules that keep it trustworthy
 
-**Nothing is written without review.** Capture proposes into `~/brain/inbox/`; you approve
-or reject. A memory that is 80% right is worse than none, because it degrades every later
-output invisibly and you cannot tell which fifth is wrong.
+**Nothing is deleted, and nothing waits for approval.** A memory that is 80% right is
+worse than none — but a review queue nobody walks through is not the fix. It rots while the
+graph stays frozen. So everything enters the brain immediately carrying keywords that say
+how much weight to give it: `use`, `cite`, `confirm`, `verify`, `ignore`. A single capture
+is `cite` — apply it, but say it is unconfirmed. A project quiet for three weeks is
+`confirm` — ask before building on it. Nothing is ever removed; it just stops being
+loaded.
 
-**Everything expires.** Every node carries `review_by`. A brain where nothing expires rots
+**Everything expires.** Relevance and evidence are recomputed nightly from measured
+activity, and every node carries `review_by`. A brain where nothing expires rots
 quietly until a stale fact embarrasses you — and then you stop trusting all of it.
 `keel health` surfaces expiries, contradictions, broken references and unanchored
 documents.
@@ -88,6 +93,41 @@ cp -r keel/templates/* ~/brain/_templates/
 
 Then run `/keel` in Claude Code. First invocation runs setup.
 
+### Let it build itself (recommended)
+
+Without this, the brain only grows when you remember to run `/keel remember`, and only
+reaches the graph when you remember to run `/keel review`. In practice neither happens, and
+you end up with a full inbox and a graph frozen on install day.
+
+`autobrain.py` reads your own Claude Code and Codex transcripts from disk, measures how
+much *active* time went into each topic, and writes when repetition and time both clear:
+
+```bash
+python3 ~/.claude/skills/keel/scripts/autobrain.py scan      # see it before trusting it
+python3 ~/.claude/skills/keel/scripts/autobrain.py promote   # dry run; --apply to write
+```
+
+Then schedule `scripts/nightly.sh`. On macOS, a launchd agent at 02:30:
+
+```bash
+cp scripts/nightly.sh ~/.claude/skills/keel/scripts/ && chmod +x ~/.claude/skills/keel/scripts/nightly.sh
+cp examples/com.keel.autobrain.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.keel.autobrain.plist
+```
+
+Logs land in `~/brain/_index/nightly.log`. Remove it with
+`launchctl bootout gui/$(id -u)/com.keel.autobrain`.
+
+It writes a `task` node for sustained work that has none, flags nodes the work has moved
+past, and promotes repeated captures out of the inbox. It never rewrites prose — no
+pattern-match can tell that a sentence stopped being true, so it flags the node and leaves
+the rewrite to a session.
+
+**Set up `~/brain/_index/lexicon.json` first** (see `examples/lexicon.example.json`). It
+maps topics to the phrases you actually type, and it is the difference between this working
+and silently reporting nothing. Keep the phrases distinctive: one generic word merges
+unrelated topics into identical figures that look like real data.
+
 ### Load preferences into every session (optional)
 
 A `SessionStart` hook puts your profile and standing preferences into context before you
@@ -99,16 +139,40 @@ type anything. Add to `~/.claude/settings.json`:
     "SessionStart": [
       { "hooks": [ {
           "type": "command",
-          "command": "python3 $HOME/.claude/skills/keel/scripts/session_start.py 2>/dev/null || true",
-          "timeout": 5
+          "command": "python3 $HOME/.claude/skills/keel/scripts/autobrain.py session-start --days 14",
+          "timeout": 15
       } ] }
     ]
   }
 }
 ```
 
-It fails silently and exits 0 if the brain is missing, so a broken hook never blocks a
-session. `keel health` warns if it is loading nothing.
+It ships the directive legend and names anything gated, then appends a
+**live-topics block** — what you have actually spent time on lately, and
+whether the brain is behind it. Reads a 12h cache, so it costs ~80ms. It fails silently and
+exits 0 if the brain is missing, so a broken hook never blocks a session.
+(`scripts/session_start.py` is a shim onto the same code, for existing installs.)
+
+### Live, in every client
+
+Three wires, and the brain stops being a daily snapshot:
+
+```bash
+# 1. context at session start (Claude Code, desktop and VS Code)
+#    hooks.SessionStart -> autobrain.py session-start
+# 2. capture at session end — this is what removes the day-long lag
+#    hooks.SessionEnd   -> autobrain.py sync --quiet
+# 3. live lookups mid-session, both clients
+#    mcpServers.keel    -> scripts/mcp_server.py
+```
+
+`sync` absorbs, promotes, re-states and refreshes both exports in under two
+seconds, because parsed transcripts are cached by mtime. Without wire 2, two
+sessions on the same day cannot see each other's work.
+
+Every write takes an exclusive `flock` on `~/brain/_index/brain.lock`, so the
+nightly pass, a session hook and an MCP capture cannot interleave and lose one
+another's changes.
 
 ### MCP server — one brain, every client
 
@@ -146,6 +210,18 @@ is not reachable from a web page. Upload the brain to a Project for read-only us
 there. Remote MCP would fix it and is deliberately not built: hosting other
 people's brains means auth, storage and a privacy surface, which is a company
 rather than a tool you can `git clone`.
+
+### Keeping both clients in sync
+
+Claude Code and Codex each keep their own copy of the skill, and they drift. Run this after
+every change, from a checkout:
+
+```bash
+./scripts/sync-clients.sh
+```
+
+It backs up each client directory before overwriting, and skips clients that do not have
+the skill installed.
 
 ### Codex skill
 
@@ -200,8 +276,8 @@ your work involves. The generated `_index/brain.html` maps all of it; treat it a
 
 ## Status
 
-Working, and in daily use by its author. Not yet built: a scheduled agent for overnight
-capture, and an MCP server so retrieval is instant and the same brain serves Claude, Codex
-and Cursor from one process.
+Working, and in daily use by its author. Overnight capture and the MCP server are both in.
+Not yet built: a graph index inside the MCP server, so retrieval is a lookup rather than a
+filesystem walk, and Cursor support.
 
 MIT.

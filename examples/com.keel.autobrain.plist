@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Keel nightly pass. Copy to ~/Library/LaunchAgents/ then:
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.keel.autobrain.plist
+     Remove with:
+       launchctl bootout gui/$(id -u)/com.keel.autobrain -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.keel.autobrain</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>$HOME/.claude/skills/keel/scripts/nightly.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>30</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardErrorPath</key><string>/tmp/keel.nightly.err</string>
+</dict>
+</plist>

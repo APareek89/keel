@@ -3,6 +3,10 @@
 Keel brain tools.
 
     brain.py health          text report: staleness, orphans, capture rate, breakages
+    brain.py missing         structural gaps: decisions with no rejected alternative, etc.
+    brain.py todo            open loops and live risks
+    brain.py connectors      which connectors are new since last asked
+    brain.py export-codex    refresh the keel block in ~/.codex/AGENTS.md
     brain.py view [--no-open] writes an HTML overview + knowledge graph and opens it
 
 Reads ~/brain (override with BRAIN_DIR). Standard library only — no pip install,
@@ -344,6 +348,16 @@ def cmd_view(auto_open=True):
                 "excerpt": " ".join(d["_body"].split())[:260],
             })
 
+    heat, seen_on = {}, {}
+    try:
+        _live = json.loads((BRAIN / "_index" / "live.json").read_text())
+        for _r in _live.get("rows", []):
+            if _r.get("entity"):
+                heat[_r["entity"]] = _r.get("hours", 0)
+                seen_on[_r["entity"]] = _r.get("last")
+    except Exception:
+        pass
+
     payload = {
         "nodes": [{
             "id": n["id"],
@@ -358,6 +372,9 @@ def cmd_view(auto_open=True):
             "excerpt": " ".join(n["_body"].split())[:300],
             "docs": sorted(docs_for.get(n["id"], []), key=lambda x: x["type"]),
             "color": PALETTE.get(n.get("type", ""), "#7A8480"),
+            "age": (TODAY - u).days if (u := as_date(n.get("updated"))) else None,
+            "hours": heat.get(n["id"], 0),
+            "active": seen_on.get(n["id"]),
         } for n in a["entities"]],
         "edges": a["edges"],
         "stats": {
@@ -464,7 +481,13 @@ const idx={}, N=D.nodes.map((n,i)=>{idx[n.id]=i;
 const E=D.edges.filter(e=>idx[e.from]!=null&&idx[e.to]!=null)
  .map(e=>({s:idx[e.from],t:idx[e.to],type:e.type}));
 E.forEach(e=>{N[e.s].deg++;N[e.t].deg++});
-const R=n=>6+Math.min(n.deg,6)*1.2+Math.min((n.docs||[]).length,8)*0.9;
+const R=n=>6+Math.min(n.deg,6)*1.2+Math.min((n.docs||[]).length,8)*0.9
+           +Math.min(Math.sqrt(n.hours||0),5)*1.6;
+// Freshness: full strength when touched this week, fading to a husk past a month.
+const FRESH=n=>n.age==null?0.5:n.age<=7?1:n.age<=14?0.82:n.age<=30?0.6:n.age<=60?0.4:0.28;
+const hex2=h=>{const m=/^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(h);
+  return m?[1,2,3].map(i=>parseInt(m[i],16)):[122,132,128];};
+const fade=(h,a)=>{const[r,g,b]=hex2(h);return `rgba(${r},${g},${b},${a})`;};
 
 let sel=null,drag=null,ox=0,oy=0;
 
@@ -522,9 +545,18 @@ function draw(){
     ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();});
   N.forEach((n,i)=>{
     const r=R(n),act=sel===i;
-    ctx.beginPath();ctx.arc(n.x,n.y,r,0,7);ctx.fillStyle=n.color;
+    ctx.beginPath();ctx.arc(n.x,n.y,r,0,7);ctx.fillStyle=fade(n.color,FRESH(n));
     ctx.globalAlpha=sel==null||act||E.some(e=>(e.s===sel&&e.t===i)||(e.t===sel&&e.s===i))?1:.28;
     ctx.fill();
+    // Work happened after the node was last updated -> the brain is out of date.
+    if(n.active && n.updated && n.active > n.updated){
+      ctx.beginPath();ctx.arc(n.x,n.y,r+3.5,0,7);
+      ctx.strokeStyle="#D9822B";ctx.lineWidth=2;ctx.stroke();
+    } else if(n.stale){
+      ctx.beginPath();ctx.arc(n.x,n.y,r+3.5,0,7);
+      ctx.strokeStyle="#C0392B";ctx.lineWidth=1.5;ctx.setLineDash([3,3]);
+      ctx.stroke();ctx.setLineDash([]);
+    }
     if(n.stale){ctx.strokeStyle=css('--crit');ctx.lineWidth=2;ctx.stroke();}
     if(act){ctx.strokeStyle=ink;ctx.lineWidth=2;ctx.stroke();}
     ctx.font=(act?'600 ':'')+'11px -apple-system,system-ui,sans-serif';

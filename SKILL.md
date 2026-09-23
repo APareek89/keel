@@ -60,12 +60,13 @@ Keel — what would you like?
   /keel brain      Visual map of everything it knows
   /keel health     Is it being fed, still true, still retrievable?
   /keel missing    What it should know and doesn't
-  /keel review     Approve or reject captured proposals   (N waiting)
+  /keel pending    What it will not use without asking you   (N gated)
   /keel remember   Capture something from this conversation
 ```
 
-Fill in N from the file count in `~/brain/inbox/`. Print it and stop — no
-commentary, and don't recommend which to pick unless asked.
+Fill in N from `autobrain.py state` — the count of items on `confirm` or
+`verify`. Print it and stop — no commentary, and don't recommend which to pick
+unless asked.
 
 ---
 
@@ -79,8 +80,9 @@ this turn.
   a sequence, not a clarifying follow-up. One.
 - **Don't narrate while working.** No "now reading the Codex sessions…". Work, then
   report once at the end.
-- **Don't ask what to do with what you find.** Everything becomes an inbox proposal.
-  That *is* the review step, and it happens later, when they chooses.
+- **Don't ask what to do with what you find.** Everything is staged in `inbox/`
+  and drained into the brain by the next pass, labelled `inferred`/`cite`. The
+  labels do the gating, not a conversation.
 - **Never stop midway to ask.** If a source is slow, unparseable or empty, skip it
   and mention it in the closing summary.
 
@@ -130,9 +132,9 @@ request from them.
 | Exports they already has | `~/Downloads/*.zip` matching `chatgpt`/`conversations`/`claude*export` | Only these name patterns. Never a general Downloads scan. |
 
 **Read order matters.** Start with Claude Code memory (structured, instant), then
-Claude Code sessions (richest signal), then Codex sessions. Stop when the inbox has
-enough for one review sitting — a hundred proposals they'll never get through is worse
-than twenty they will.
+Claude Code sessions (richest signal), then Codex sessions. Breadth beats depth on
+the first pass — everything lands labelled as unconfirmed, and repetition promotes
+what turns out to matter.
 
 **The flow.** Use AskUserQuestion so they can pick with a click:
 
@@ -147,10 +149,10 @@ than twenty they will.
 
 Multi-select. Nothing is mandatory; skipping every source is a valid answer.
 
-Then process what they chose into `~/brain/inbox/` as proposals, never straight into
-the brain. Expect a large first batch; group the review by type so approving is fast.
-Aim for breadth over depth on the first pass: a thin `person` node for everyone who
-matters beats a rich node for one.
+Then stage what they chose into `~/brain/inbox/` and run
+`autobrain.py sync`, which drains it into the brain labelled `inferred`/`cite`.
+Aim for breadth over depth: a thin `person` node for everyone who matters beats a
+rich node for one.
 
 Finally write the setup marker so the menu stops offering this:
 
@@ -240,13 +242,16 @@ If nothing relevant exists, say so plainly rather than padding with tangential f
 
 ## Capture (`remember`)
 
-**Nothing is written straight into the brain.** Proposals go to `~/brain/inbox/`
-as `YYYY-MM-DD-<slug>.md` and wait for review.
+**Write it into the brain immediately, marked unconfirmed.** There is no review
+queue. One that nobody walks through is not a safety mechanism — it is a queue
+that rots while the graph stays frozen on install day.
 
-A memory that is 80% right is worse than none: it degrades every future output
-invisibly and they have no way to tell which fifth is wrong. The review gate is the
-only thing between a useful brain and a poisoned one. Don't bypass it, even when
-the fact seems obviously correct.
+A memory that is 80% right is still worse than none, so the protection moved from
+a gate to a label: a single capture lands as `evidence: inferred` /
+`directive: cite`, which tells a later session to apply it *but say it is
+unconfirmed*. Three independent captures make it `observed` and it stops being
+hedged. Quiet for a fortnight and it becomes `confirm`, so a session asks before
+relying on it. Nothing is ever deleted.
 
 **The test for keeping something: will it change what I do in a future session?**
 
@@ -294,23 +299,30 @@ One page, in this order. Skip empty blocks rather than padding them.
 5. **Inbox triage** — filter connector deltas against the graph. Surface mail from
    people and projects they owns; count the rest rather than listing it.
 6. **Needs a look** — run `brain.py health` and report only what it flags.
-7. **Approve queue** — count in `~/brain/inbox/`.
+7. **Gated** — items on `confirm` or `verify`. One line each, and ask.
 
 Every block should retire an item, flag a slip, or ask a one-line question. A brief
 that only ever adds to their list gets abandoned within a fortnight.
 
 ---
 
-## Review
+## Pending
 
-Read each file in `~/brain/inbox/`. Show a compact summary — type, claim, source,
-confidence — and take their call one at a time. Group by type when the batch is large.
+There is nothing to approve. `autobrain.py state` keeps every item labelled, and
+this command shows the ones the brain will not let you use silently:
 
-On approval: move the file to the right directory and **add the reciprocal edge** to
-anything it points at. On rejection: delete it. If they edits it, keep their wording
-verbatim — their phrasing of their own preferences beats yours.
+```bash
+python3 ~/.claude/skills/keel/scripts/autobrain.py state --verbose
+```
 
----
+Everything on `confirm` has gone quiet for 15–60 days; everything on `verify` has
+work that continued after it was written. Both mean the same thing operationally:
+**ask the user in one line before relying on it**, naming what you want it for.
+
+When they answer, act on it rather than just reporting — still true, so bump
+`updated:`; moved on, so rewrite it and keep the superseded text in a dated
+`<details>` block; finished, so set `status: archived` and it stops loading while
+staying on disk.
 
 ## Health, Missing, To-do, Brain
 
@@ -477,10 +489,18 @@ a stale fact embarrasses them, and then they stops trusting all of it.
 Direction reads subject → object: `task-q4-campaign --owned_by--> person-self`.
 Getting it backwards silently corrupts traversal.
 
-**Preferences are scoped, not global.** A preference with `relation: applies_to`
-fires only for that task type. One with no `about:` at all is global — correct for
-"give a recommendation, not a survey", and it loads via the hook rather than being
-retrieved.
+**Preferences are scoped, not global — and this decides what every session pays
+for.** A preference with `about:` fires only for what it names and is retrieved on
+demand. One with no `about:` is **loaded into every session, forever**, so it must
+be genuinely cross-cutting: "give a recommendation, not a survey", how they want to
+be taught, document conventions. That is about four files.
+
+**Anchor every captured preference.** A capture written without `about:` silently
+becomes global and starts taxing unrelated sessions. Five absorbed at once was
+enough to push the real standing rules out of the budget, and because the loader
+sorted by filename, `audio-course-teaching-style` evicted `working-with-me`.
+Anything `ignore` is never loaded, and scoped preferences are deferred rather than
+competing, so "over budget" now means genuine pressure.
 
 ### Layout
 
@@ -492,7 +512,8 @@ retrieved.
   wiki/                     ← documents. prose, unbounded, read.
     decisions/  risks/  constraints/  preferences/  playbooks/  tasks/  notes/
   loops/                    ← structured state: owed.md, waiting-on.md
-  inbox/  _templates/  _index/
+  inbox/                    ← staging only; drained by `sync`, never a queue
+  _templates/  _index/
 ```
 
 The split is visible in the filesystem on purpose: it forces the question at
@@ -504,10 +525,153 @@ Templates are in `_templates/`. Copy one rather than writing frontmatter from me
 
 ## What runs automatically
 
-A SessionStart hook loads `profile.md` and `preferences/` into every session — those
-are already in context before you read this. Everything else runs when invoked.
+Three pieces, all deterministic — no model, no tokens. Install them once:
 
-Not yet built, in the order it would pay off: a **scheduled agent** for the nightly
-capture pass and the morning brief, and an **MCP server** holding a graph index so
-retrieval is instant and the same brain works from Codex and Cursor. Say so plainly
-if they ask — don't imply more automation than exists.
+1. **SessionStart hook** → `autobrain.py session-start`. Loads `profile.md`,
+   everything in `preferences/`, and a **live-topics block** measured from the
+   user's own Claude Code and Codex transcripts. Emits the hook JSON envelope,
+   reads a 12h cache, costs ~80ms. A node whose topic shows activity newer than
+   its `updated:` is marked stale there — when you are about to rely on one, ask
+   first. (`scripts/session_start.py` is a shim onto the same code.)
+2. **Nightly pass** — `scripts/nightly.sh`, run by cron or a launchd agent.
+   Runs `promote --apply`, `export-codex`, `view`. Logs to
+   `~/brain/_index/nightly.log`.
+3. **Codex** gets the same context through the `keel:start`/`keel:end` block in
+   `~/.codex/AGENTS.md`, rewritten nightly. Text outside the markers is preserved.
+
+### State, not approval
+
+**Nothing is deleted and nothing waits for a human queue.** Everything enters the
+brain immediately and carries keywords saying how much weight to give it. A review
+gate nobody walks through is not a safety mechanism — it is a queue that rots,
+while the graph stays frozen on install day.
+
+Two **independent** axes, because a thing can be recent but unproven, or old but
+certain, and those need different answers. Conflating them is what makes lifecycle
+models unusable.
+
+**Relevance** — recency of activity on its topic, measured from transcripts:
+
+| band | when | directive |
+|---|---|---|
+| `current` | activity ≤14d | `use` |
+| `fading` | 15–60d | `confirm` |
+| `dormant` | >60d | `ignore` (retained, never deleted) |
+| `standing` | identity and global preferences | `use` |
+| `imminent` | a `deadline:` within 45 days | `use` — and named in every session |
+| `expired` | a `deadline:` in the past | `verify` — find out what happened |
+| `paused` / `archived` | set explicitly | `confirm` / `ignore` |
+
+**Evidence** — strength of the claim:
+
+| band | when | directive |
+|---|---|---|
+| `stated` | the user said it outright | `use` |
+| `observed` | ≥3 independent captures | `use` |
+| `inferred` | 1–2 captures, or auto-written | `cite` |
+| `contradicted` | newer activity than the content | `verify` |
+| `superseded` | explicitly replaced | `ignore` |
+
+**Drift is tracked separately, and deliberately does not change the directive.**
+An assertive document — decision, constraint, preference, playbook — whose topic
+kept moving for more than 14 days after it was written is a `drift_candidate`.
+Timing cannot distinguish "still true, work continued" from "quietly reversed",
+so flagging all of them `verify` would mean 13 warnings to catch 1, which is how
+a directive gets ignored. The script nominates; a session adjudicates:
+
+```bash
+python3 scripts/autobrain.py drift
+```
+
+Still true → add `reviewed: YYYY-MM-DD`. Changed → write the new document and set
+`supersedes` / `superseded_by`; never edit the old one into agreement, because the
+rejected alternative is the valuable half of a decision.
+
+**The stricter directive wins.** Five keywords a session acts on:
+
+```
+use     — apply it; no need to mention it
+cite    — apply it, but say it is unconfirmed
+confirm — ASK before relying on it; the work may have moved on
+verify  — content may be false; newer activity contradicts it
+ignore  — do not load unless asked; retained, never deleted
+```
+
+The legend ships in the SessionStart block, and entities needing confirmation are
+listed there by name, so a session does not have to open files to discover it must
+ask. Run `autobrain.py state --apply`; the nightly pass does it for you.
+
+**Three rules keep this honest:**
+1. **Identity does not decay.** People, orgs, skills, the profile and global
+   preferences are `standing` — a colleague's role is not made uncertain by a quiet
+   fortnight. Only work state decays.
+2. **Only a topic's own node can be contradicted** by activity on it. A person who
+   merely mentions a project is not invalidated by work on that project. Skipping
+   this flags two-thirds of the brain as suspect.
+3. **An explicit judgement outranks a day count.** `status: paused` means paused
+   whether it went quiet yesterday or last month.
+4. **Recency is not correctness — and for a decision it is nearly the opposite.**
+   A decision on a busy topic scores `current`/`stated`/`use` and is applied
+   silently, yet a busy topic is exactly where agreements get reversed. This is
+   not hypothetical: the decision mandating this skill's own review gate sat at
+   `use` for four days after the gate was removed, *because* the work was active.
+   Contradiction detection could never catch it — that rule required the file to
+   be its topic's own entity node, which no document ever is.
+5. **A deadline inverts decay.** Recency is the wrong proxy for anything with a
+   date: a fallback that triggers in eight days was being faded out for going
+   quiet, exactly when it mattered most. Put `deadline: YYYY-MM-DD` on it and it
+   loads into every session with the days remaining, until it passes — then it
+   becomes `verify`, because an unresolved deadline is a question, not a fact.
+
+### The promotion rule
+
+Repetition **and** time must both clear for a *new node*, because either alone is a
+bad signal: one long session is a detour, and ten passing mentions are noise.
+
+| promotes | when |
+|---|---|
+| a new `task` node | ≥3 sessions **and** ≥3 distinct days **and** ≥2h active, with no node |
+| a staleness flag | topic activity is newer than the node's `updated:` |
+
+Anything auto-written carries `auto: true` and lands as `inferred`/`cite`, so it can
+be audited or reverted with one grep.
+
+### `autobrain.py`
+
+```bash
+python3 scripts/autobrain.py scan       # what was worked on vs what the brain knows
+python3 scripts/autobrain.py promote    # dry run; --apply to write
+python3 scripts/autobrain.py digest     # unclaimed sessions, to name new topics
+python3 scripts/autobrain.py state       # recompute directives; --apply to write
+python3 scripts/autobrain.py absorb      # dissolve inbox/ into the brain; --apply
+python3 scripts/autobrain.py export-codex
+```
+
+**The division of labour matters.** The script counts — deterministic, exact,
+free. It never writes prose, because no amount of pattern-matching can tell that
+"employment ends 10 September" stopped being true. It flags the node; a session
+rewrites it, moving superseded text into a dated `<details>` block rather than
+deleting it.
+
+### Two things that will bite
+
+**The lexicon is where matching lives or dies.** `~/brain/_index/lexicon.json`
+maps topics to the phrases the user actually types — they say "cover letter",
+never "job search". Without it, matching silently under-reports. It is also where
+matching goes *wrong*: one generic word there merges unrelated topics into
+identical hour counts, which looks like working data and is not. A single shared
+tag once fused three separate projects this way. The opposite failure is just as
+easy: two topics sharing a common word ("notebook") caused the nightly pass to
+auto-create a second node for work that already had one. **Before adding a topic,
+check whether an existing one already covers it, and pin it with `entity_map`
+rather than letting it spawn a duplicate.** Keep phrases distinctive; run `digest`
+to find work no topic claims yet. See `examples/lexicon.example.json`.
+
+**Transcripts are not user speech.** A `type:user` record contains injected skill
+text, pastes, command output and tool results. Counting those produces confident
+nonsense — topics like "script" and "review" with a hundred sessions each.
+`is_human()` filters them; don't remove it.
+
+**Still not built:** a graph index in the MCP server so retrieval is instant and
+the same brain works from Cursor. Say so plainly if asked — don't imply more
+automation than exists.
