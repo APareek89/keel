@@ -11,9 +11,9 @@ updated: YYYY-MM-DD
 review_by: YYYY-MM-DD
 tags: []
 edges:
-  - type: reports_to
+  - type: works_at
     to:
-  - type: cares_about
+  - type: reports_to
     to:
 ---
 

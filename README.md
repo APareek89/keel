@@ -4,7 +4,8 @@ A persistent context layer for AI coding sessions. It remembers how you work, wh
 decided, and who you work with — so you stop re-briefing the model every morning.
 
 Keel is a Claude Code skill plus a plain-markdown knowledge base at `~/brain`. It also
-works in Codex. There is no server, no database and no account.
+works in Codex, and in Claude Desktop, Cursor or any MCP client through a local MCP
+server. Nothing is hosted: no database, no account — the markdown files are the database.
 
 ```
 /keel orient     Load what matters for what you're working on
@@ -37,8 +38,8 @@ persist, they relate to each other, and walking between them is meaningful. This
 stays small — tens of nodes — which is what keeps it legible and traversal cheap.
 
 **Wiki — statements about those things.** Decisions, risks, constraints, preferences,
-playbooks, notes. Prose, *read* rather than traversed, growing without bound. Each carries
-an `about:` reference into the graph; that reference is its only link.
+playbooks, commitments, notes. Prose, *read* rather than traversed, growing without
+bound. Each carries an `about:` reference into the graph; that reference is its only link.
 
 Putting a decision *in* the graph ruins both layers. Decisions rarely relate to other
 decisions in a way worth walking — they are statements about a project or a kind of work.
@@ -48,7 +49,7 @@ still has to be read to be useful.
 |  | Graph | Wiki |
 |---|---|---|
 | Holds | entities | statements about entities |
-| Types | `person` `org` `task` `task_type` `skill` `system` | `decision` `risk` `constraint` `preference` `playbook` `note` |
+| Types | `profile` `person` `org` `task` `task_type` `skill` `system` | `decision` `risk` `constraint` `preference` `playbook` `commitment` `note` |
 | Links via | `edges:` entity → entity | `about:` document → entity |
 | Found by | traversal from an anchor | pulled via `about:`, or searched |
 | Grows | slowly, bounded | continuously, unbounded |
@@ -82,16 +83,25 @@ documents.
 git clone https://github.com/APareek89/keel.git
 mkdir -p ~/.claude/skills/keel
 cp -r keel/SKILL.md keel/scripts ~/.claude/skills/keel/
-mkdir -p ~/brain/{graph/{people,orgs,tasks,task_types,skills},wiki/{decisions,risks,constraints,preferences,playbooks,notes},loops,inbox,_templates,_index}
+mkdir -p ~/brain/{graph/{people,orgs,tasks,task_types,skills,systems},wiki/{decisions,risks,constraints,preferences,playbooks,commitments,notes},loops,inbox,_templates,_index}
 cp -r keel/templates/* ~/brain/_templates/
 ```
 
 Then run `/keel` in Claude Code. First invocation runs setup.
 
+Using Codex too? Install the same skill there — the Codex MCP config below points at
+this copy:
+
+```bash
+mkdir -p ~/.codex/skills/keel
+cp -r keel/SKILL.md keel/scripts ~/.codex/skills/keel/
+```
+
 ### Load preferences into every session (optional)
 
-A `SessionStart` hook puts your profile and standing preferences into context before you
-type anything. Add to `~/.claude/settings.json`:
+A `SessionStart` hook puts your profile and global preferences into context before you
+type anything. A preference scoped to a kind of work — one with an `about:` — stays out
+until that work comes up. Add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -117,7 +127,8 @@ A local stdio MCP server exposes the brain to Claude Desktop, Codex and Cursor.
 your own markdown. The files are the database.
 
 ```json
-// ~/Library/Application Support/Claude/claude_desktop_config.json
+// Claude Desktop: ~/Library/Application Support/Claude/claude_desktop_config.json
+// Cursor:         ~/.cursor/mcp.json
 { "mcpServers": { "keel": {
     "command": "python3",
     "args": ["/Users/YOU/.claude/skills/keel/scripts/mcp_server.py"] } } }
@@ -130,8 +141,20 @@ command = "python3"
 args = ["/Users/YOU/.codex/skills/keel/scripts/mcp_server.py"]
 ```
 
-Seven tools: `keel_recall` `keel_remember` `keel_list_entities` `keel_read`
-`keel_health` `keel_missing` `keel_todo`. Check it before wiring a client:
+Eleven tools:
+
+| Tool | Does |
+|---|---|
+| `keel_profile` | your profile and global preferences — clients other than Claude Code have no session hook, so the model calls this first |
+| `keel_recall` | two-step retrieval for whatever the session touches |
+| `keel_remember` | propose a decision, constraint, preference, risk, playbook, note or commitment — or a new person, org, task, task type, skill or system |
+| `keel_inbox` `keel_approve` `keel_reject` | review proposals from any client |
+| `keel_list_entities` `keel_read` | browse the graph |
+| `keel_health` `keel_missing` `keel_todo` | the same reports as the commands below |
+
+In clients that show server instructions, the server tells the model to call
+`keel_profile` first. Check it before wiring a client — it only reads your brain,
+and runs its write path in a throwaway one:
 
 ```bash
 python3 scripts/mcp_server.py --selftest
@@ -139,7 +162,7 @@ python3 scripts/mcp_server.py --selftest
 
 This is what makes the brain *shared* rather than copied. Without it each client
 holds its own snapshot and they drift; with it, a capture from Claude Desktop
-lands in the same inbox as one from Claude Code.
+lands in the same inbox as one from Claude Code, and either can approve it.
 
 **claude.ai in a browser is the one surface this does not reach** — a local server
 is not reachable from a web page. Upload the brain to a Project for read-only use
@@ -155,16 +178,19 @@ Codex has no session-start hook, so its always-loaded file *is* the hook:
 python3 ~/.claude/skills/keel/scripts/brain.py export-codex
 ```
 
-Writes your profile and preferences into `~/.codex/AGENTS.md` between managed markers, so
-anything you wrote in that file survives. Re-run when preferences change; `health` flags
-the export when it goes stale.
+Writes your profile and global preferences into `~/.codex/AGENTS.md` between managed
+markers, so anything you wrote in that file survives. Re-run when they change; `health`
+flags the export when it goes stale.
 
 ## Commands
 
 ```bash
 python3 ~/.claude/skills/keel/scripts/brain.py health         # fed? true? retrievable?
 python3 ~/.claude/skills/keel/scripts/brain.py missing        # structural gaps
-python3 ~/.claude/skills/keel/scripts/brain.py todo           # open loops, live risks
+python3 ~/.claude/skills/keel/scripts/brain.py todo           # open loops, commitments, live risks
+python3 ~/.claude/skills/keel/scripts/brain.py inbox          # proposals waiting for review
+python3 ~/.claude/skills/keel/scripts/brain.py approve FILE   # file a proposal into the brain
+python3 ~/.claude/skills/keel/scripts/brain.py reject FILE    # delete a proposal
 python3 ~/.claude/skills/keel/scripts/brain.py view           # HTML map + graph
 python3 ~/.claude/skills/keel/scripts/brain.py export-codex   # sync to Codex
 ```
@@ -201,7 +227,6 @@ your work involves. The generated `_index/brain.html` maps all of it; treat it a
 ## Status
 
 Working, and in daily use by its author. Not yet built: a scheduled agent for overnight
-capture, and an MCP server so retrieval is instant and the same brain serves Claude, Codex
-and Cursor from one process.
+capture and the morning brief.
 
 MIT.

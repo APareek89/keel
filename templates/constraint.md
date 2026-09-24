@@ -10,6 +10,10 @@ created: YYYY-MM-DD
 updated: YYYY-MM-DD
 review_by: YYYY-MM-DD
 tags: []
+# the work or entity the rule binds, usually a task type
+about:
+  - relation: constrains
+    entity:
 ---
 
 **Rule.**

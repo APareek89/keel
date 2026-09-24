@@ -2,8 +2,15 @@
 """
 Keel brain tools.
 
-    brain.py health          text report: staleness, orphans, capture rate, breakages
-    brain.py view [--no-open] writes an HTML overview + knowledge graph and opens it
+    brain.py health             fed? true? retrievable? will the brief work?
+    brain.py missing            structural gaps
+    brain.py todo               open loops, commitments, open tasks, live risks
+    brain.py view [--no-open]   writes an HTML overview + knowledge graph and opens it
+    brain.py inbox              proposals waiting for review
+    brain.py approve <file>     file a proposal from inbox/ into the brain
+    brain.py reject <file>      delete a proposal
+    brain.py connectors --seen a,b [--record]
+    brain.py export-codex       profile + global preferences into ~/.codex/AGENTS.md
 
 Reads ~/brain (override with BRAIN_DIR). Standard library only — no pip install,
 no external assets, so the HTML works offline and nothing leaves the machine.
@@ -12,8 +19,8 @@ no external assets, so the HTML works offline and nothing leaves the machine.
 import os
 import sys
 import json
-import html
-import subprocess
+import pathlib
+import webbrowser
 from pathlib import Path
 from datetime import date, datetime, timedelta
 
@@ -98,10 +105,126 @@ def as_date(value):
 # traversed. Mixing them is what makes the graph unreadable.
 # a project is just a task with children — one recursive type, not two
 ENTITY_TYPES = {"profile", "person", "org", "task", "task_type", "skill", "system"}
+DOC_TYPES = {"decision", "risk", "constraint", "preference", "playbook", "note", "commitment"}
+
+# where an approved node is filed. The profile is the one fixed path: graph/profile.md
+FOLDER = {
+    "person": "graph/people", "org": "graph/orgs", "task": "graph/tasks",
+    "task_type": "graph/task_types", "skill": "graph/skills", "system": "graph/systems",
+    "decision": "wiki/decisions", "risk": "wiki/risks", "constraint": "wiki/constraints",
+    "preference": "wiki/preferences", "playbook": "wiki/playbooks", "note": "wiki/notes",
+    "commitment": "wiki/commitments",
+}
+
+# the one edge pair in the vocabulary with an inverse — approval adds the other half
+INVERSE = {"owns": "owned_by", "owned_by": "owns"}
+
+INACTIVE = ("superseded", "archived")
 
 
 def is_entity(n):
     return n.get("type") in ENTITY_TYPES
+
+
+def is_global_preference(n):
+    """A preference with no `about:` fires on every session. One with `about:`
+    is scoped: it loads only when what it's about is in play."""
+    return n.get("type") == "preference" and not n.get("about")
+
+
+def add_months(d, months):
+    y, m = d.year, d.month + months
+    y, m = y + (m - 1) // 12, (m - 1) % 12 + 1
+    return date(y, m, min(d.day, 28))
+
+
+def hook_sources():
+    """What loads into every session: the profile and the global preferences.
+    One definition for the SessionStart hook, the Codex export and the MCP
+    server. Load a scoped preference everywhere and scoping means nothing."""
+    paths = []
+    profile = BRAIN / "graph" / "profile.md"
+    if profile.exists():
+        paths.append(profile)
+    prefs = BRAIN / "wiki" / "preferences"
+    for p in (sorted(prefs.glob("*.md")) if prefs.is_dir() else []):
+        try:
+            meta, _ = parse_frontmatter(p.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        if not meta.get("about") and meta.get("status") not in INACTIVE:
+            paths.append(p)
+    return paths
+
+
+def standing_context(budget=6000):
+    """(path in the brain, text) for each hook source that fits the budget, plus
+    the paths of any skipped for size. The budget stops one file that grew
+    unbounded from quietly taxing every session."""
+    loaded, skipped, used = [], [], 0
+    for p in hook_sources():
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if not text:
+            continue
+        rel = str(p.relative_to(BRAIN))
+        if used + len(text) > budget:
+            skipped.append(rel)
+            continue
+        loaded.append((rel, text))
+        used += len(text)
+    return loaded, skipped
+
+
+def loop_rows(name):
+    """Data rows of loops/<name>.md, a hand-kept markdown table. The header is
+    the row just above the |---| rule; `_(empty` rows are placeholders."""
+    f = BRAIN / "loops" / f"{name}.md"
+    if not f.exists():
+        return []
+    lines = [ln.strip() for ln in f.read_text(encoding="utf-8", errors="replace").splitlines()]
+
+    def is_rule(ln):
+        return ln.startswith("|") and set(ln) <= set("|-: ")
+
+    rows = []
+    for i, ln in enumerate(lines):
+        if not ln.startswith("|") or is_rule(ln) or "_(empty" in ln:
+            continue
+        if i + 1 < len(lines) and is_rule(lines[i + 1]):
+            continue                                   # header row
+        rows.append(ln)
+    return rows
+
+
+def direction_of(c):
+    return ((c.get("direction") or "").split() or ["owed"])[0]
+
+
+def open_commitments(nodes, direction):
+    """Commitment documents not yet done, `direction: owed` or `waiting-on`,
+    soonest due first."""
+    return sorted((n for n in nodes if n.get("type") == "commitment"
+                   and n.get("status") not in ("done",) + INACTIVE
+                   and direction_of(n) == direction),
+                  key=lambda n: str(as_date(n.get("due")) or "9999"))
+
+
+def commitment_line(c):
+    """One line for the brief: what, with whom, when — and how long the silence is."""
+    bits = [c.get("title") or c["id"]]
+    if c.get("counterparty"):
+        bits.append(c["counterparty"])
+    due = as_date(c.get("due"))
+    if due:
+        bits.append(f"due {due}")
+    asked = as_date(c.get("created"))
+    if direction_of(c) == "waiting-on" and asked:
+        bits.append(f"asked {(TODAY - asked).days} day(s) ago")
+    line = "  ·  ".join(bits)
+    return line + ("  ← PAST DUE" if due and due < TODAY else "")
 
 
 def analyse(nodes):
@@ -135,11 +258,9 @@ def analyse(nodes):
             doc_count[a["entity"]] = doc_count.get(a["entity"], 0) + 1
         for a in bad:
             dangling.append((d["id"], a["entity"], d["_path"]))
-        # a global preference (no applies_to) is loaded by the hook every session,
+        # a global preference (no `about:`) is loaded by the hook every session,
         # never retrieved by walking — it is correctly unanchored, not a gap.
-        always_loaded = d.get("type") == "preference" and not any(
-            a.get("relation") == "applies_to" for a in d.get("about", []))
-        if not refs and not always_loaded:
+        if not refs and not is_global_preference(d):
             unanchored.append(d)
 
     stale = [n for n in nodes
@@ -223,12 +344,11 @@ def cmd_health():
         print("    Inbox empty — nothing awaiting your review.")
 
     # the hook loading nothing is invisible in normal use — check it explicitly
-    hook_src = [BRAIN / "graph" / "profile.md"] + list((BRAIN / "wiki" / "preferences").glob("*.md"))
-    if not any(s.exists() for s in hook_src):
+    if not hook_sources():
         problems.append("SessionStart hook has nothing to load — paths moved?")
-        print("\n  ! The hook finds no profile or preferences. It is silently loading")
-        print("    nothing into every session. Expected graph/profile.md and")
-        print("    wiki/preferences/*.md")
+        print("\n  ! The hook finds no profile or global preferences. It is silently")
+        print("    loading nothing into every session. Expected graph/profile.md, or")
+        print("    wiki/preferences/*.md with no `about:`")
 
     # --- is what's in there still true?
     print("\n  IS IT STILL TRUE?")
@@ -250,17 +370,20 @@ def cmd_health():
     stamp = BRAIN / "_index" / "codex_export.json"
     if stamp.exists():
         try:
-            exported = as_date(json.loads(stamp.read_text()).get("exported"))
+            info = json.loads(stamp.read_text())
         except (ValueError, OSError):
-            exported = None
-        srcs = [BRAIN / "graph" / "profile.md"] + list((BRAIN / "wiki" / "preferences").glob("*.md"))
-        newest = max((as_date(parse_frontmatter(s.read_text())[0].get("updated"))
-                      for s in srcs if s.exists()), default=None)
-        if exported and newest and newest > exported:
+            info = {}
+        exported = as_date(info.get("exported"))
+        srcs = hook_sources()
+        dates = [d for p in srcs
+                 if (d := as_date(parse_frontmatter(p.read_text(encoding="utf-8", errors="replace"))[0].get("updated")))]
+        newest = max(dates, default=None)
+        moved = sorted(info.get("files") or []) != sorted(str(p.relative_to(BRAIN)) for p in srcs)
+        if exported and ((newest and newest > exported) or moved):
             problems.append("Codex export is stale — re-run export-codex")
-            print(f"    ! Codex export is from {exported} but preferences changed "
-                  f"{newest}. Codex is running on old preferences:")
-            print("        python3 ~/.claude/skills/keel/scripts/brain.py export-codex")
+            print(f"    ! Codex export is from {exported} but the profile or global preferences "
+                  f"changed since. Codex is running on old preferences:")
+            print(f"        python3 {pathlib_str(__file__)} export-codex")
 
     # --- can it actually be found?
     print("\n  CAN IT BE RETRIEVED?")
@@ -289,20 +412,17 @@ def cmd_health():
 
     # --- will the brief have anything to say?
     print("\n  WILL THE MORNING BRIEF WORK?")
+    in_use = any(n.get("type") == "commitment" for n in nodes)
     for name in ("owed", "waiting-on"):
-        f = BRAIN / "loops" / f"{name}.md"
-        if not f.exists():
-            print(f"    ! loops/{name}.md missing.")
+        n = len(open_commitments(nodes, name)) + len(loop_rows(name))
+        if n:
+            print(f"    ✓ {name}: {n} item(s).")
             continue
-        rows = [l for l in f.read_text().splitlines()
-                if l.strip().startswith("|") and "---" not in l
-                and "_(empty" not in l and not l.strip().startswith("| Owed")
-                and not l.strip().startswith("| Waiting")]
-        if rows:
-            print(f"    ✓ {name}: {len(rows)} item(s).")
-        else:
-            problems.append(f"loops/{name}.md is empty")
-            print(f"    ! {name}: empty — this block of the brief will be blank.")
+        print(f"    ! {name}: nothing recorded — this block of the brief will be blank.")
+        print(f"      A commitment with `direction: {name}` fills it, or a row in loops/{name}.md.")
+        # only a problem once the brief is in use — a fresh brain isn't nagged
+        if in_use or (BRAIN / "loops" / f"{name}.md").exists():
+            problems.append(f"nothing recorded as {name}")
 
     print("\n  " + "-" * 58)
     if problems:
@@ -379,12 +499,22 @@ def cmd_view(auto_open=True):
     target.write_text(HTML.replace("__DATA__", json.dumps(payload)), encoding="utf-8")
 
     print(f"Wrote {target}  ({payload['stats']['nodes']} nodes, {payload['stats']['edges']} edges)")
-    if auto_open:
-        try:
-            subprocess.run(["open", str(target)], check=False)
-        except Exception:
-            pass
+    if auto_open and not open_in_browser(target):
+        print("  Open it in a browser — there's no desktop session here to open it in.")
     return 0
+
+
+def open_in_browser(path):
+    """Open a local file in the desktop browser — macOS, Linux or Windows.
+    With no desktop session it does nothing, rather than start a terminal
+    browser that would hang whoever ran the command."""
+    if sys.platform.startswith("linux") and not (
+            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    try:
+        return webbrowser.open(path.resolve().as_uri())
+    except Exception:
+        return False
 
 
 HTML = r"""<!doctype html><html><head><meta charset="utf-8">
@@ -591,29 +721,37 @@ def cmd_missing():
     for n in nodes:
         by.setdefault(n.get("type"), []).append(n)
     ids = {n["id"] for n in nodes}
-    out_edges = {}
-    for n in nodes:
-        out_edges[n["id"]] = [e for e in n.get("edges", []) if e.get("to") in ids]
+    out_edges = {n["id"]: [e for e in n.get("edges", []) if e.get("to") in ids] for n in nodes}
+
+    def has(node, *etypes):
+        return any(e.get("type") in etypes for e in out_edges.get(node["id"], []))
+
+    # documents reach the graph through `about:` — never through edges
+    written = {}
+    for d in a["docs"]:
+        for ref in d.get("about", []):
+            written.setdefault(ref["entity"], []).append(d)
+    task_types = {n["id"] for n in by.get("task_type", [])}
+    # a project is just a task with children
+    parents = {e["to"] for n in by.get("task", []) for e in out_edges[n["id"]]
+               if e.get("type") == "part_of"}
+    projects = [n for n in by.get("task", []) if n["id"] in parents]
 
     gaps = []
 
-    def has(node, etype):
-        return any(e.get("type") == etype for e in out_edges.get(node["id"], []))
-
     # decisions with no rejected alternative recorded
     for n in by.get("decision", []):
-        if "**Rejected" not in n["_body"] and not has(n, "rejected_in_favour_of"):
+        if "**Rejected" not in n["_body"] and not n.get("rejected_in_favour_of"):
             gaps.append(("decision has no rejected alternative", n["_path"],
                          "the most valuable half of a decision is what lost"))
     # task types with no playbook
     for n in by.get("task_type", []):
-        if not has(n, "documented_by"):
+        if not any(d.get("type") == "playbook" for d in written.get(n["id"], [])):
             gaps.append(("task type has no playbook", n["_path"],
                          "recurring work with no written procedure"))
-    # playbooks not reachable from a task type
-    tt_targets = {e["to"] for n in by.get("task_type", []) for e in out_edges.get(n["id"], [])}
+    # playbooks not about any task type
     for n in by.get("playbook", []):
-        if n["id"] not in tt_targets:
+        if not any(ref["entity"] in task_types for ref in n.get("about", [])):
             gaps.append(("playbook attached to no task type", n["_path"],
                          "will never be pulled in automatically"))
     # documents with no graph anchor
@@ -621,18 +759,20 @@ def cmd_missing():
         gaps.append(("document has no graph anchor", n["_path"],
                      "no `about:` — only findable by search, not by walking from an entity"))
     # entities carrying no knowledge at all
-    for n in a["entities"]:
-        if n.get("type") in ("person", "project", "task_type") and not a["doc_count"].get(n["id"]):
-            gaps.append((f"{n.get('type')} has no documents", n["_path"],
+    project_ids = {n["id"] for n in projects}
+    for n in by.get("person", []) + by.get("task_type", []) + projects:
+        if not a["doc_count"].get(n["id"]):
+            kind = "project" if n["id"] in project_ids else n.get("type")
+            gaps.append((f"{kind} has no documents", n["_path"],
                          "nothing is known about it beyond its own node"))
     # global preferences that may want scoping
     for n in by.get("preference", []):
-        if not has(n, "applies_to"):
+        if is_global_preference(n):
             gaps.append(("preference is global", n["_path"],
                          "fires on every session — is that right?"))
     # projects with no owner
-    for n in by.get("project", []):
-        if not has(n, "owned_by"):
+    for n in projects:
+        if not has(n, "owned_by", "created_by"):
             gaps.append(("project has no owner", n["_path"], "no accountable person"))
     # risks past review
     for n in by.get("risk", []):
@@ -668,28 +808,20 @@ def cmd_missing():
 
 def cmd_todo():
     nodes = load_nodes()
-    rows = []
-    for name, label in (("owed", "YOU OWE"), ("waiting-on", "WAITING ON")):
-        f = BRAIN / "loops" / f"{name}.md"
-        if not f.exists():
-            continue
-        body = [l for l in f.read_text().splitlines()
-                if l.strip().startswith("|") and "---" not in l
-                and "_(empty" not in l and "| Owed to" not in l and "| Waiting on" not in l]
-        rows.append((label, body))
-
     open_tasks = [n for n in nodes if n.get("type") == "task"
-                  and n.get("status") not in ("done", "archived")]
+                  and n.get("status") not in ("done",) + INACTIVE]
     live_risks = [n for n in nodes if n.get("type") == "risk" and n.get("status") == "active"]
 
     print(f"\n  TO DO · {TODAY}")
     print("  " + "-" * 62)
-    for label, body in rows:
+    for name, label in (("owed", "YOU OWE"), ("waiting-on", "WAITING ON")):
+        commitments, rows = open_commitments(nodes, name), loop_rows(name)
         print(f"\n  {label}")
-        if body:
-            for b in body:
-                print("    " + b.strip())
-        else:
+        for c in commitments:
+            print("    " + commitment_line(c))
+        for r in rows:
+            print("    " + r)
+        if not commitments and not rows:
             print("    (empty — the morning brief has nothing to show here)")
     if open_tasks:
         print("\n  OPEN TASKS")
@@ -738,6 +870,193 @@ def cmd_connectors():
     return 0
 
 
+# ---------------------------------------------------------------- review
+
+def inbox_items():
+    """Proposals waiting for review, oldest first: (path, meta, body)."""
+    box = BRAIN / "inbox"
+    items = []
+    for p in (sorted(box.glob("*.md")) if box.is_dir() else []):
+        meta, body = parse_frontmatter(p.read_text(encoding="utf-8", errors="replace"))
+        items.append((p, meta, body))
+    return items
+
+
+def inbox_file(name):
+    """A proposal by file name. Only a bare name inside inbox/ resolves, so a
+    caller can never reach outside it."""
+    name = Path(str(name)).name
+    if name and not name.endswith(".md"):
+        name += ".md"
+    p = BRAIN / "inbox" / name
+    if not name or not p.is_file():
+        raise ValueError(f"No proposal named {name or '(empty)'} in inbox/.")
+    return p
+
+
+def _split(text):
+    """Frontmatter lines and body, verbatim — approval files a proposal, it
+    doesn't re-render it through a parser that only knows a subset of YAML."""
+    lines = text.splitlines()
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if not lines or lines[0].strip() != "---" or end is None:
+        raise ValueError("Proposal has no frontmatter.")
+    return lines[1:end], "\n".join(lines[end + 1:]).strip()
+
+
+def _set_field(fm, key, value):
+    """Set a top-level scalar in frontmatter lines, or append it."""
+    for i, line in enumerate(fm):
+        if line[:1] not in ("", " ", "\t", "#") and line.partition(":")[0].strip() == key:
+            fm[i] = f"{key}: {value}"
+            return
+    fm.append(f"{key}: {value}")
+
+
+def _add_edge(path, etype, target):
+    """Append one edge to an entity file's `edges:` block, creating the block if
+    there is none. False if the edge is already there."""
+    text = path.read_text(encoding="utf-8")
+    meta, _ = parse_frontmatter(text)
+    if any(e.get("type") == etype and e.get("to") == target for e in meta.get("edges", [])):
+        return False
+    lines = text.splitlines()
+    end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    new = [f"  - type: {etype}", f"    to: {target}"]
+    for i in range(1, end):
+        if lines[i][:1] not in ("", " ", "\t") and lines[i].partition(":")[0].strip() == "edges":
+            lines[i] = "edges:"                        # `edges: []` becomes a block
+            j = i + 1
+            while j < end and (not lines[j].strip() or lines[j][:1] in (" ", "\t")):
+                j += 1
+            lines[j:j] = new
+            break
+    else:
+        lines[end:end] = ["edges:"] + new
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return True
+
+
+def approve(name, content=None):
+    """File a proposal into the brain. `content`, if given, replaces the body
+    verbatim — the user's wording of their own preferences beats yours."""
+    src = inbox_file(name)
+    text = src.read_text(encoding="utf-8", errors="replace")
+    meta, _ = parse_frontmatter(text)
+    fm, body = _split(text)
+    kind, nid = meta.get("type"), meta.get("id")
+    if not nid:
+        raise ValueError(f"{src.name} has no `id:` — it would be invisible once filed.")
+    if kind != "profile" and kind not in FOLDER:
+        raise ValueError(f"{src.name} has type {kind!r}, which isn't in the model. "
+                         f"Use one of: profile, {', '.join(sorted(FOLDER))}.")
+    nodes = load_nodes()
+    known = {n["id"]: n for n in nodes}
+    if nid in known:
+        raise ValueError(f"`{nid}` already exists at {known[nid]['_path']}. Merge the "
+                         f"proposal into it by hand, or change its id, then approve again.")
+    if kind == "profile":
+        dest = BRAIN / "graph" / "profile.md"
+        if dest.exists():
+            raise ValueError("graph/profile.md already exists. Merge the proposal into it by hand.")
+    else:
+        slug = nid[len(kind) + 1:] if nid.startswith(kind + "-") else nid
+        dest, k = BRAIN / FOLDER[kind] / f"{slug}.md", 2
+        while dest.exists():
+            dest, k = BRAIN / FOLDER[kind] / f"{slug}-{k}.md", k + 1
+
+    notes = []
+    if content is not None and str(content).strip():
+        body = str(content).strip()
+        _set_field(fm, "updated", str(TODAY))
+        notes.append("body replaced with the user's wording")
+    if not as_date(meta.get("review_by")):
+        rv = add_months(TODAY, 6)
+        _set_field(fm, "review_by", str(rv))
+        notes.append(f"had no review_by — set to {rv}")
+    for ref in meta.get("about", []):
+        tgt = known.get(ref["entity"])
+        if not tgt:
+            notes.append(f"about → {ref['entity']} doesn't exist yet — health will flag it")
+        elif not is_entity(tgt):
+            notes.append(f"about → {ref['entity']} is a document; `about:` must name an entity")
+    if kind in ENTITY_TYPES and meta.get("about"):
+        notes.append("entities link through `edges:`; its `about:` is ignored")
+    if kind not in ENTITY_TYPES and meta.get("edges"):
+        notes.append("documents link through `about:`; its `edges:` are ignored — move them")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text("---\n" + "\n".join(fm) + "\n---\n\n" + body + "\n", encoding="utf-8")
+    src.unlink()
+
+    # the reciprocal half of any edge that has one, so walking works from both ends
+    if kind in ENTITY_TYPES:
+        for e in meta.get("edges", []):
+            tgt = known.get(e.get("to"))
+            if not tgt:
+                notes.append(f"edge → {e.get('to')} doesn't exist yet — health will flag it")
+                continue
+            inv = INVERSE.get(e.get("type"))
+            if inv and is_entity(tgt) and _add_edge(BRAIN / tgt["_path"], inv, nid):
+                notes.append(f"added {tgt['id']} --{inv}--> {nid}")
+
+    msg = f"Approved → {dest.relative_to(BRAIN)}"
+    return msg + "".join(f"\n  · {n}" for n in notes)
+
+
+def reject(name):
+    p = inbox_file(name)
+    meta, _ = parse_frontmatter(p.read_text(encoding="utf-8", errors="replace"))
+    p.unlink()
+    return f"Rejected — deleted {p.name} ({meta.get('title') or 'untitled'})."
+
+
+def cmd_inbox():
+    items = inbox_items()
+    print(f"\n  INBOX · {len(items)} proposal(s) waiting")
+    print("  " + "-" * 62)
+    if not items:
+        print("  Nothing to review.\n")
+        return 0
+    for kind in sorted({m.get("type") or "?" for _, m, _ in items}):
+        print(f"\n  {kind.upper()}")
+        for p, m, _ in items:
+            if (m.get("type") or "?") != kind:
+                continue
+            refs = [a["entity"] for a in m.get("about", [])] + [e["to"] for e in m.get("edges", [])]
+            print(f"    {p.name}")
+            print(f"        {m.get('title') or '(untitled)'} · {m.get('confidence') or '?'} "
+                  f"confidence · {m.get('provenance') or 'no source'}")
+            if refs:
+                print(f"        → {', '.join(refs)}")
+    print("\n  Approve:  brain.py approve <file>     Reject:  brain.py reject <file>\n")
+    return 0
+
+
+def cmd_approve():
+    if len(sys.argv) < 3:
+        print("usage: brain.py approve <inbox file>")
+        return 1
+    try:
+        print(approve(sys.argv[2]))
+    except ValueError as e:
+        print(e)
+        return 1
+    return 0
+
+
+def cmd_reject():
+    if len(sys.argv) < 3:
+        print("usage: brain.py reject <inbox file>")
+        return 1
+    try:
+        print(reject(sys.argv[2]))
+    except ValueError as e:
+        print(e)
+        return 1
+    return 0
+
+
 # ---------------------------------------------------------------- codex export
 
 START = "<!-- keel:start — generated, do not edit by hand -->"
@@ -746,43 +1065,53 @@ END = "<!-- keel:end -->"
 CODEX_GUIDE = """
 ## Keel — the user's brain
 
-A knowledge base at `~/brain` holds his preferences, decisions, constraints,
-people and open loops. His profile and standing preferences are inlined below —
-they are already loaded, don't re-read those files.
+A knowledge base at `{brain}` holds the user's preferences, decisions,
+constraints, people and open loops. Their profile and global preferences are
+inlined below — they are already loaded, don't re-read those files.
 
-**Before substantive work**, pull what's relevant. Find anchors — a project,
-person, task type, or the repo you're in — then read those files and follow
-their `edges:` one hop:
+**If the `keel` MCP server is connected, use it:** `keel_recall` before
+substantive work, `keel_remember` to capture. Otherwise work the files.
+
+**Before substantive work**, pull what's relevant in two steps. First anchor in
+the graph — which entities does this session touch? A task, a person, a kind of
+work, the repo you're in. Read those files and follow their `edges:` one hop:
 
 ```
-rg -l -i "<anchor>" ~/brain --glob '!journal/*' --glob '!inbox/*' --glob '!_templates/*'
+rg -l -i "<anchor>" {brain}/graph
 ```
 
-Always include anything in `~/brain/constraints/` — standing rules, violated
-silently, are expensive. Skip nodes with `status: superseded` or `archived`.
-Budget a few thousand tokens; cut by graph distance, never by truncating a file.
-Say what you loaded, so he can spot the brain feeding you something wrong.
+Then pull the documents written about those entities:
+
+```
+rg -l "entity: <entity-id>" {brain}/wiki
+```
+
+Read constraints and scoped preferences first, then decisions, then the rest.
+Skip `status: superseded` and `archived`. Budget a few thousand tokens; drop
+whole documents by rank, never truncate one. Say what you loaded, so the user
+can spot the brain feeding you something wrong.
 
 **When something worth keeping appears** — a decision with its rejected
 alternative, a constraint, a scoped preference, a risk with a review date, a
-commitment with a date — write it to `~/brain/inbox/YYYY-MM-DD-<slug>.md`.
+commitment with a date — write it to `{brain}/inbox/YYYY-MM-DD-<slug>.md`.
 **Never write directly into the brain.** A memory that is 80% right is worse
 than none, because it degrades every later output invisibly. The inbox is the
 review gate.
 
-Copy frontmatter from `~/brain/_templates/` rather than writing it from memory.
+Copy frontmatter from `{brain}/_templates/` rather than writing it from memory.
 `review_by` is mandatory on every node.
 
 **Useful commands:**
 
 ```
-python3 ~/.claude/skills/keel/scripts/brain.py health    # fed? true? retrievable?
-python3 ~/.claude/skills/keel/scripts/brain.py missing   # structural gaps
-python3 ~/.claude/skills/keel/scripts/brain.py todo      # open loops, live risks
+python3 {script} health    # fed? true? retrievable?
+python3 {script} missing   # structural gaps
+python3 {script} todo      # open loops, commitments, live risks
+python3 {script} inbox     # proposals waiting for review
 ```
 
-`~/brain/_index/brain.html` maps his private context including people and
-commitments — never publish or upload it.
+`{brain}/_index/brain.html` maps the user's private context including people
+and commitments — never publish or upload it.
 """
 
 
@@ -790,33 +1119,34 @@ def cmd_export_codex():
     """Write ~/.codex/AGENTS.md so the same brain works in Codex.
 
     Codex has no session-start hook, so its always-loaded file IS the hook:
-    profile and preferences are inlined. Re-run whenever those change.
+    the profile and global preferences are inlined. Re-run whenever those change.
     """
     brain = BRAIN
     if not brain.is_dir():
         print(f"No brain at {brain}.")
         return 1
 
-    paths = [brain / "graph" / "profile.md"] + sorted((brain / "wiki" / "preferences").glob("*.md"))
     chunks = []
-    for p in paths:
+    for p in hook_sources():
         try:
             t = p.read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
             continue
         if t:
-            chunks.append(f"### {p.relative_to(brain)}\n\n{t}")
+            chunks.append((p, f"### {p.relative_to(brain)}\n\n{t}"))
     if not chunks:
-        print("Nothing to export — no profile or preferences.")
+        print("Nothing to export — no profile or global preferences.")
         return 1
 
+    script = pathlib_str(__file__)
+    guide = CODEX_GUIDE.replace("{brain}", pathlib_str(brain)).replace("{script}", script)
     block = (f"{START}\n"
-             f"<!-- regenerate: python3 {pathlib_str(__file__)} export-codex -->\n"
-             f"{CODEX_GUIDE}\n"
+             f"<!-- regenerate: python3 {script} export-codex -->\n"
+             f"{guide}\n"
              f"### Loaded automatically\n\n"
-             f"Treat the following as how he wants to be worked with, not as "
+             f"Treat the following as how the user wants to be worked with, not as "
              f"background reading.\n\n"
-             + "\n\n".join(chunks)
+             + "\n\n".join(c for _, c in chunks)
              + f"\n\n<!-- exported {TODAY} -->\n{END}")
 
     out = pathlib.Path.home() / ".codex" / "AGENTS.md"
@@ -841,19 +1171,19 @@ def cmd_export_codex():
     stamp = brain / "_index" / "codex_export.json"
     stamp.parent.mkdir(exist_ok=True)
     stamp.write_text(json.dumps({"exported": str(TODAY), "target": str(out),
-                                 "files": [str(p.relative_to(brain)) for p in paths]}, indent=2))
+                                 "files": [str(p.relative_to(brain)) for p, _ in chunks]}, indent=2))
 
+    profile = any(p == brain / "graph" / "profile.md" for p, _ in chunks)
+    prefs = len(chunks) - profile
     print(f"{action} {out}")
-    print(f"  {len(block)} chars — profile + {len(chunks)-1} preference file(s)")
-    print("  Re-run after changing profile.md or anything in preferences/.")
+    print(f"  {len(block)} chars — {'profile + ' if profile else 'no profile, '}"
+          f"{prefs} global preference file(s)")
+    print("  Re-run after changing profile.md or a global preference.")
     return 0
 
 
 def pathlib_str(p):
     return str(pathlib.Path(p).resolve()).replace(str(pathlib.Path.home()), "~")
-
-
-import pathlib  # noqa: E402  (used by the export helpers above)
 
 
 if __name__ == "__main__":
@@ -862,6 +1192,9 @@ if __name__ == "__main__":
         "health": cmd_health,
         "missing": cmd_missing,
         "todo": cmd_todo,
+        "inbox": cmd_inbox,
+        "approve": cmd_approve,
+        "reject": cmd_reject,
         "connectors": cmd_connectors,
         "export-codex": cmd_export_codex,
     }

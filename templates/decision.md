@@ -10,7 +10,11 @@ created: YYYY-MM-DD
 updated: YYYY-MM-DD
 review_by: YYYY-MM-DD
 tags: []
-edges: []
+# the entity it is about: a task, a task type, a person. Documents never carry edges.
+about:
+  - relation: shaped
+    entity:
+# supersedes: decision-id-this-replaces
 ---
 
 **Decision.**

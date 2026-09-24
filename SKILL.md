@@ -13,6 +13,10 @@ was already decided, at the start of every session. The failure that would be
 worse: a brain full of noise that makes output *less* accurate. Guard the second
 at least as hard as the first.
 
+Scripts live in this skill's `scripts/` folder — `~/.claude/skills/keel/scripts/`
+in Claude Code, `~/.codex/skills/keel/scripts/` in Codex. Commands below use the
+Claude Code path.
+
 ---
 
 ## First invocation — set up, then show the commands
@@ -43,11 +47,18 @@ Work out which client you are in — `~/.claude/skills/keel/` means Claude Code,
 Then add the client to `setup.json` and say in one line what changed:
 
 ```
-Keel wired to Codex — your profile and preferences now load into every Codex
-session via AGENTS.md.
+Keel wired to Codex — your profile and global preferences now load into every
+Codex session via AGENTS.md.
 ```
 
 Then print the menu. Total: one action, no questions.
+
+**Claude Desktop, Cursor and other MCP clients** can't read `~/brain` through
+this skill — they reach it through the local MCP server, `scripts/mcp_server.py`
+(see [Other clients](#other-clients--the-mcp-server)). When the user asks to
+wire one, add the `keel` entry to that client's MCP config — the paths are in
+the README — run `mcp_server.py --selftest`, and add `"claude-desktop"` or
+`"cursor"` to `clients`. One edit; they restart the client to pick it up.
 
 ### The menu
 
@@ -80,7 +91,7 @@ this turn.
 - **Don't narrate while working.** No "now reading the Codex sessions…". Work, then
   report once at the end.
 - **Don't ask what to do with what you find.** Everything becomes an inbox proposal.
-  That *is* the review step, and it happens later, when they chooses.
+  That *is* the review step, and it happens later, when they choose.
 - **Never stop midway to ask.** If a source is slow, unparseable or empty, skip it
   and mention it in the closing summary.
 
@@ -96,7 +107,7 @@ Then **stop**. Don't offer next steps, don't ask whether they want to review now
 don't summarise what you learned about them. They'll come back when they want to.
 
 Runs once. The point is to build a brain worth having on day one, from sources they
-already has connected — not to leave them with an empty directory.
+already have connected — not to leave them with an empty directory.
 
 **Four rules, in order of importance:**
 
@@ -127,7 +138,7 @@ request from them.
 | Claude Desktop | `~/Library/Application Support/Claude/` | Large. Format not verified — report what's there, don't promise it parses. |
 | Cursor | `~/Library/Application Support/Cursor/User/globalStorage/` | Mostly editor state; chat history is in an opaque store. Low expected yield — say so. |
 | ChatGPT desktop | `~/Library/Application Support/com.openai.chat/` | Pairing config only, no history. Mention it's empty rather than staying silent. |
-| Exports they already has | `~/Downloads/*.zip` matching `chatgpt`/`conversations`/`claude*export` | Only these name patterns. Never a general Downloads scan. |
+| Exports they already have | `~/Downloads/*.zip` matching `chatgpt`/`conversations`/`claude*export` | Only these name patterns. Never a general Downloads scan. |
 
 **Read order matters.** Start with Claude Code memory (structured, instant), then
 Claude Code sessions (richest signal), then Codex sessions. Stop when the inbox has
@@ -152,7 +163,8 @@ the brain. Expect a large first batch; group the review by type so approving is 
 Aim for breadth over depth on the first pass: a thin `person` node for everyone who
 matters beats a rich node for one.
 
-Finally write the setup marker so the menu stops offering this:
+Finally write the setup marker to `~/brain/_index/setup.json`, so the menu stops
+offering this:
 
 ```json
 {
@@ -165,9 +177,8 @@ Finally write the setup marker so the menu stops offering this:
 
 `clients` is what stops a fresh install in the other editor from either
 re-running the whole setup or silently doing nothing. Add `"codex"` when Codex is
-wired, `"claude-code"` when Claude Code is.
-
-to `~/brain/_index/setup.json`, then show them the menu.
+wired, `"claude-code"` when Claude Code is, `"claude-desktop"` or `"cursor"` when
+their MCP entry is added. Then show them the menu.
 
 ---
 
@@ -197,11 +208,13 @@ switched off.
 
 Loading the whole brain defeats the point — it wastes context and drowns the signal.
 
-The SessionStart hook has **already loaded** `profile.md` and everything in
-`preferences/`. Don't re-read them. Your job is the selective part:
+The SessionStart hook has **already loaded** `profile.md` and the global
+preferences — those with no `about:`. Don't re-read them. Your job is the
+selective part, scoped preferences included:
 
-**Step 1 — anchor in the graph.** Which entities does this session touch? A project,
-a person, a task type, the repo in the cwd. Search entities only — it's a small set:
+**Step 1 — anchor in the graph.** Which entities does this session touch? A task or
+project, a person, a task type, the repo in the cwd. Search entities only — it's a
+small set:
 
 ```bash
 rg -l -i "<anchor>" ~/brain/graph
@@ -225,13 +238,13 @@ the rest. Recency breaks ties.
 the playbook, the scoped preferences and the constraints for that kind of work,
 all in one pull. That is the whole reason the type layer exists.
 
-Skip `status: superseded` and `archived` unless they's asking about history. When
+Skip `status: superseded` and `archived` unless they're asking about history. When
 there's no obvious anchor, fall back to full-text search across `~/brain/wiki`.
 
 Budget 2–4k tokens. Over budget, drop whole documents by rank — never truncate one,
 since a half-read constraint is worse than an unread one.
 
-Then say in two or three lines what you loaded and why. They needs to be able to spot
+Then say in two or three lines what you loaded and why. They need to be able to spot
 the brain feeding you something wrong, and they can't if retrieval is invisible.
 
 If nothing relevant exists, say so plainly rather than padding with tangential files.
@@ -259,8 +272,9 @@ hang from.
 Worth capturing — a **decision** with its rejected alternative and reason; a
 **preference**, scoped with `applies_to` unless it genuinely is global; a
 **constraint**; a **risk** with a review date; a **person** fact; a **commitment**
-with a date; a **task_type** when a piece of work looks like it will recur; a
-**playbook** when a procedure is worth repeating.
+with a `due` date and a `direction` (`owed` or `waiting-on`); a **task_type** when
+a piece of work looks like it will recur; a **playbook** when a procedure is worth
+repeating.
 
 Not worth capturing — anything recoverable from the repo or filesystem, session
 narration, restatements of tool output, facts with no bearing on future work. When
@@ -286,15 +300,19 @@ One page, in this order. Skip empty blocks rather than padding them.
 
 1. **Today's shape** — calendar. Per meeting: who's attending, their `person` node,
    open loops with them.
-2. **You owe** — `loops/owed.md`, by due date. Flag anything past due.
-3. **Waiting on** — `loops/waiting-on.md` plus mail and Slack threads. Compute days
-   elapsed and name the silence: *"Asked the reviewer 9 days ago, no reply."* This block is
+2. **You owe** — commitments with `direction: owed`, plus any rows in
+   `loops/owed.md`, by due date. `brain.py todo` lists both and flags anything
+   past due.
+3. **Waiting on** — commitments with `direction: waiting-on` and
+   `loops/waiting-on.md`, plus mail and Slack threads. Compute days elapsed and
+   name the silence: *"Asked the reviewer 9 days ago, no reply."* This block is
    why the brief exists.
-4. **Blocked on you** — projects with a `blocked_by` edge on a decision they haven't made.
+4. **Blocked on you** — tasks that a document `blocks` (through `about:`) where
+   the next move is theirs: a decision they haven't made, an answer they owe.
 5. **Inbox triage** — filter connector deltas against the graph. Surface mail from
-   people and projects they owns; count the rest rather than listing it.
+   people and tasks they own; count the rest rather than listing it.
 6. **Needs a look** — run `brain.py health` and report only what it flags.
-7. **Approve queue** — count in `~/brain/inbox/`.
+7. **Approve queue** — the count from `brain.py inbox`.
 
 Every block should retire an item, flag a slip, or ask a one-line question. A brief
 that only ever adds to their list gets abandoned within a fortnight.
@@ -303,12 +321,15 @@ that only ever adds to their list gets abandoned within a fortnight.
 
 ## Review
 
-Read each file in `~/brain/inbox/`. Show a compact summary — type, claim, source,
-confidence — and take their call one at a time. Group by type when the batch is large.
+`brain.py inbox` lists what's waiting. Read each file, show a compact summary —
+type, claim, source, confidence — and take their call one at a time. Group by type
+when the batch is large.
 
-On approval: move the file to the right directory and **add the reciprocal edge** to
-anything it points at. On rejection: delete it. If they edits it, keep their wording
-verbatim — their phrasing of their own preferences beats yours.
+On approval run `brain.py approve <file>`. It files the node in the right folder,
+adds the **reciprocal edge** for `owns`/`owned_by`, fills a missing `review_by`,
+and refuses if the id already exists — merge by hand then. On rejection run
+`brain.py reject <file>`. If they edit it, write their wording into the inbox file
+verbatim first — their phrasing of their own preferences beats yours.
 
 ---
 
@@ -326,8 +347,9 @@ python3 ~/.claude/skills/keel/scripts/brain.py view      # HTML map + graph
 ```
 
 **Codex.** The same brain works in Codex via `~/.codex/AGENTS.md`, which has their
-profile and preferences inlined — Codex has no session-start hook, so its
-always-loaded file *is* the hook. Regenerate whenever profile or preferences change:
+profile and global preferences inlined — Codex has no session-start hook, so its
+always-loaded file *is* the hook. Regenerate whenever the profile or a global
+preference changes:
 
 ```bash
 python3 ~/.claude/skills/keel/scripts/brain.py export-codex
@@ -359,18 +381,38 @@ needs updating, or archive.
 
 ---
 
+## Other clients — the MCP server
+
+Claude Desktop, Cursor and anything else that speaks MCP reach the same `~/brain`
+through `scripts/mcp_server.py`, a local stdio server. It keeps every rule here:
+two-step retrieval, proposals into `inbox/`, nothing filed without approval.
+
+| Tool | Does |
+|---|---|
+| `keel_profile` | the profile and global preferences — the hook's job, in clients with no hook |
+| `keel_recall` | two-step retrieval for whatever the session touches |
+| `keel_remember` | propose a document or an entity into `inbox/` |
+| `keel_inbox` `keel_approve` `keel_reject` | the review gate |
+| `keel_list_entities` `keel_read` | browse the graph |
+| `keel_health` `keel_missing` `keel_todo` | the reports above |
+
+Check it with `python3 scripts/mcp_server.py --selftest`. It only reads the real
+brain; its write path runs in a throwaway one.
+
+---
+
 ## The model — two layers
 
 **This is the heart of the skill.** Memory is a small entity graph plus a growing
 wiki, and keeping them apart is what makes both work.
 
-**Graph — things with identity.** People, orgs, projects, task types, skills,
-systems. They persist, they relate to each other, and walking between them is
-meaningful. This layer stays small — tens of nodes, not hundreds — which is what
+**Graph — things with identity.** People, orgs, tasks and projects, task types,
+skills, systems. They persist, they relate to each other, and walking between them
+is meaningful. This layer stays small — tens of nodes, not hundreds — which is what
 keeps it readable and traversal cheap.
 
 **Wiki — statements about those things.** Decisions, risks, constraints,
-preferences, playbooks, task records, notes. These are prose, they are *read* not
+preferences, playbooks, commitments, notes. These are prose, they are *read* not
 traversed, and they grow without bound. They carry an `about:` reference into the
 graph; that reference is their only link to it.
 
@@ -383,11 +425,14 @@ actual content still has to be read to be useful.
 | | Graph | Wiki |
 |---|---|---|
 | Holds | entities | statements about entities |
-| Types | `profile` `person` `org` `project` `task_type` `skill` `system` | `decision` `risk` `constraint` `preference` `playbook` `task` `note` |
+| Types | `profile` `person` `org` `task` `task_type` `skill` `system` | `decision` `risk` `constraint` `preference` `playbook` `commitment` `note` |
 | Links via | `edges:` — entity → entity only | `about:` — document → entity |
 | Retrieved by | traversal from an anchor | pulled via `about:`, or searched |
 | Grows | slowly, bounded | continuously, unbounded |
 | Rendered | yes, in `/keel brain` | no — shown as documents *on* an entity |
+
+A project is just a task with children — each sub-task points at it with
+`part_of`. One recursive type, not two.
 
 ### Retrieval is two-step
 
@@ -452,7 +497,8 @@ review_by: 2027-03-02
 about:
   - relation: constrains
     entity: task_type-pricing-change
-supersedes: decision-2026-08-archive-retired    # doc → doc, a field not an edge
+# doc → doc: a field, not an edge
+supersedes: decision-2026-08-archive-retired
 ---
 
 Prose written for a model to read. This is the part that gets retrieved and
@@ -460,12 +506,12 @@ actually used — the graph only helps find it.
 ```
 
 `review_by` is mandatory on both. A brain where nothing expires rots quietly until
-a stale fact embarrasses them, and then they stops trusting all of it.
+a stale fact embarrasses them, and then they stop trusting all of it.
 
 ### Vocabularies
 
 **Entity edges** — `works_at` `reports_to` `member_of` `owns` `owned_by`
-`part_of` `instance_of` `requires_skill` `sub_skill_of` `depends_on`
+`created_by` `part_of` `instance_of` `requires_skill` `sub_skill_of` `depends_on`
 
 **Document relations** (`about:` → `relation:`) — `concerns` `constrains`
 `applies_to` `shaped` `blocks` `documents` `instance_of` `evidence_for`
@@ -480,7 +526,8 @@ Getting it backwards silently corrupts traversal.
 **Preferences are scoped, not global.** A preference with `relation: applies_to`
 fires only for that task type. One with no `about:` at all is global — correct for
 "give a recommendation, not a survey", and it loads via the hook rather than being
-retrieved.
+retrieved. Anything with an `about:` stays out of the hook and loads only when
+what it's about is in play.
 
 ### Layout
 
@@ -488,10 +535,10 @@ retrieved.
 ~/brain/
   graph/                    ← entities. small, bounded, rendered.
     profile.md
-    people/  orgs/  projects/  task_types/  skills/  systems/
+    people/  orgs/  tasks/  task_types/  skills/  systems/
   wiki/                     ← documents. prose, unbounded, read.
-    decisions/  risks/  constraints/  preferences/  playbooks/  tasks/  notes/
-  loops/                    ← structured state: owed.md, waiting-on.md
+    decisions/  risks/  constraints/  preferences/  playbooks/  commitments/  notes/
+  loops/                    ← optional hand-kept tables: owed.md, waiting-on.md
   inbox/  _templates/  _index/
 ```
 
@@ -504,10 +551,10 @@ Templates are in `_templates/`. Copy one rather than writing frontmatter from me
 
 ## What runs automatically
 
-A SessionStart hook loads `profile.md` and `preferences/` into every session — those
-are already in context before you read this. Everything else runs when invoked.
+A SessionStart hook loads `profile.md` and the global preferences into every Claude
+Code session — those are already in context before you read this. In other clients
+the MCP server's `keel_profile` does the same job when the model calls it.
+Everything else runs when invoked.
 
-Not yet built, in the order it would pay off: a **scheduled agent** for the nightly
-capture pass and the morning brief, and an **MCP server** holding a graph index so
-retrieval is instant and the same brain works from Codex and Cursor. Say so plainly
-if they ask — don't imply more automation than exists.
+Not yet built: a **scheduled agent** for the nightly capture pass and the morning
+brief. Say so plainly if they ask — don't imply more automation than exists.
